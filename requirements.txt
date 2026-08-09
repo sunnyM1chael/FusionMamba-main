@@ -1,0 +1,55 @@
+# ===== FusionMamba + DSDAM 依赖 =====
+# 云服务器上安装：pip install -r requirements.txt
+# 注意：mamba_ssm/causal_conv1d/triton 可能需要单独安装，见底部说明
+
+# --- PyTorch (根据服务器CUDA版本选择) ---
+# 当前本地版本：torch==2.5.1+cu121
+# 云服务器如果用 CUDA 11.7，改为：
+#   pip install torch==1.13.0 torchvision==0.14.0 torchaudio==0.13.0 --extra-index-url https://download.pytorch.org/whl/cu117
+# 云服务器如果用 CUDA 12.1，改为：
+#   pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+
+# --- 核心依赖 ---
+timm==0.4.12
+einops
+numpy
+opencv-python
+Pillow
+
+# --- Mamba 相关（可能需要单独装，见底部说明）---
+mamba_ssm==1.0.1
+causal_conv1d==1.0.0
+triton==2.0.0
+
+# --- 工具库 ---
+yacs
+termcolor
+chardet
+pytest
+submitit
+tensorboardX
+
+# --- 科学计算 ---
+scikit-learn
+scikit-image
+matplotlib
+scipy
+h5py
+SimpleITK
+medpy
+thop
+
+# ============================================================
+# 如果 mamba_ssm / causal_conv1d / triton 安装失败，单独执行：
+#
+# pip install triton==2.0.0
+# pip install causal_conv1d==1.0.0
+# pip install mamba_ssm==1.0.1
+#
+# 如果还失败，从源码安装：
+# pip install git+https://github.com/Dao-AILab/causal-conv1d.git
+# pip install git+https://github.com/state-spaces/mamba.git
+# ============================================================
