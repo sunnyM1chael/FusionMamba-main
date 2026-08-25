@@ -16,8 +16,7 @@ class DSDAM(nn.Module):
         self.offset_conv = nn.Sequential(
             nn.Conv2d(out_channels, out_channels//2, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(out_channels//2, 2*out_channels, kernel_size=3, padding=1),
-            nn.Conv2d(out_channels*2, out_channels*2, kernel_size=3, padding=1, groups=out_channels*2)
+            nn.Conv2d(out_channels//2, 2*3*3, kernel_size=3, padding=1),
         )
         
         self.deform_conv = DeformConv2d(out_channels, out_channels, kernel_size=3, padding=1)

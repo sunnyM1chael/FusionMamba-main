@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+# Model weights and generated archives
+*.pt
+*.pth
+*.zip
+
+# Local deployment bundle maintained separately
+yolo11_dsdam_deploy/
+
+# Training and test outputs
+model_last/
+results/
+outputs/

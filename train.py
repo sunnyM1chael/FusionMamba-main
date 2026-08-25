@@ -83,13 +83,17 @@ def train_fusion(num=0, logger=None):
     
     # ========== 消融实验开关：直接在这里修改 ==========
     # use_dsdam: 是否使用DSDAM模块（False=不使用，True=使用）
-    # dsdam_positions: DSDAM位置（['pre']融合前, ['post']融合后, ['pre','post']都用）
+    # DSDAM 统一放置在每层 DFFM 输入之前(论文规则3), 不再区分 pre/post 位置
+    # share_encoder_weights: 双流编码器权重共享开关(论文规则1)
+    #   False(默认): IR/VIS 两套独立 encoder 权重
+    #   True: IR/VIS 共享同一套 encoder 权重
     use_dsdam = False  # <-- 修改这里切换
-    dsdam_positions = ['pre']  # <-- 修改这里切换位置
+    share_encoder_weights = False  # <-- 修改这里切换编码器权重共享
     # ================================================
-    
-    fusionmodel = VSSM_Fusion(use_dsdam=use_dsdam, dsdam_positions=dsdam_positions)
-    print(f"Model: use_dsdam={use_dsdam}, dsdam_positions={dsdam_positions}")
+
+    fusionmodel = VSSM_Fusion(use_dsdam=use_dsdam, share_encoder_weights=share_encoder_weights)
+    print(f"Model: use_dsdam={use_dsdam}, DSDAM位置=每层DFFM输入前(论文规则3), "
+          f"share_encoder_weights={share_encoder_weights}")
     
     fusionmodel.cuda()
     fusionmodel.train()
@@ -106,6 +110,15 @@ def train_fusion(num=0, logger=None):
     )
     train_loader.n_iter = len(train_loader)
     criteria_fusion = Fusionloss()
+    
+    # 用于记录损失历史
+    loss_history = {
+        'step': [],
+        'loss_total': [],
+        'loss_in': [],
+        'loss_grad': [],
+        'ssim_loss': []
+    }
 
     epoch = 2
     st = glob_st = time.time()
@@ -160,7 +173,7 @@ def train_fusion(num=0, logger=None):
                         'loss_total: {loss_total:.4f}',
                         'loss_in: {loss_in:.4f}',
                         'loss_grad: {loss_grad:.4f}',
-                        'ssim_loss: {loss_ssim:.4f}',
+                        'ssim_loss: {ssim_loss:.4f}',
                         'eta: {eta}',
                         'time: {time:.4f}',
                     ]
@@ -170,16 +183,83 @@ def train_fusion(num=0, logger=None):
                     loss_total=loss_total.item(),
                     loss_in=loss_in.item(),
                     loss_grad=loss_grad.item(),
-                    loss_ssim=ssim_loss.item(),
+                    ssim_loss=ssim_loss.item(),
                     time=t_intv,
                     eta=eta,
                 )
                 logger.info(msg)
                 st = ed
+                
+                # 记录损失历史
+                loss_history['step'].append(now_it)
+                loss_history['loss_total'].append(loss_total.item())
+                loss_history['loss_in'].append(loss_in.item())
+                loss_history['loss_grad'].append(loss_grad.item())
+                loss_history['ssim_loss'].append(ssim_loss.item())
+                
     fusion_model_file = os.path.join(modelpth, 'fusion_model.pth')
     torch.save(fusionmodel.state_dict(), fusion_model_file)
     logger.info("Fusion Model Save to: {}".format(fusion_model_file))
     logger.info('\n')
+    
+    # 保存损失历史
+    loss_history_file = os.path.join(modelpth, 'loss_history.pth')
+    torch.save(loss_history, loss_history_file)
+    print(f"Loss history saved to: {loss_history_file}")
+    
+    # 绘制损失曲线
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'Training Loss Curves (use_dsdam={use_dsdam})', fontsize=14)
+        
+        steps = loss_history['step']
+        
+        axes[0, 0].plot(steps, loss_history['loss_total'], 'b-', linewidth=1.5)
+        axes[0, 0].set_xlabel('Step')
+        axes[0, 0].set_ylabel('Total Loss')
+        axes[0, 0].set_title('Total Loss')
+        axes[0, 0].grid(True)
+        
+        axes[0, 1].plot(steps, loss_history['loss_in'], 'r-', linewidth=1.5)
+        axes[0, 1].set_xlabel('Step')
+        axes[0, 1].set_ylabel('Intensity Loss')
+        axes[0, 1].set_title('Intensity Preservation Loss')
+        axes[0, 1].grid(True)
+        
+        axes[1, 0].plot(steps, loss_history['loss_grad'], 'g-', linewidth=1.5)
+        axes[1, 0].set_xlabel('Step')
+        axes[1, 0].set_ylabel('Gradient Loss')
+        axes[1, 0].set_title('Gradient Preservation Loss')
+        axes[1, 0].grid(True)
+        
+        axes[1, 1].plot(steps, loss_history['ssim_loss'], 'm-', linewidth=1.5)
+        axes[1, 1].set_xlabel('Step')
+        axes[1, 1].set_ylabel('SSIM Loss')
+        axes[1, 1].set_title('SSIM Loss')
+        axes[1, 1].grid(True)
+        
+        plt.tight_layout()
+        save_path = os.path.join(modelpth, 'loss_curves.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Loss curves saved to: {save_path}")
+        
+        # 打印最终损失值
+        if len(loss_history['loss_total']) > 0:
+            print("\n" + "="*50)
+            print("Final Loss Values:")
+            print(f"  Total Loss:  {loss_history['loss_total'][-1]:.6f}")
+            print(f"  Intensity:   {loss_history['loss_in'][-1]:.6f}")
+            print(f"  Gradient:    {loss_history['loss_grad'][-1]:.6f}")
+            print(f"  SSIM:        {loss_history['ssim_loss'][-1]:.6f}")
+            print("="*50 + "\n")
+            
+    except ImportError:
+        print("matplotlib not installed, skipping loss curve plot")
 
 
 if __name__ == "__main__":
