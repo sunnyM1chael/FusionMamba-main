@@ -87,7 +87,7 @@ def train_fusion(num=0, logger=None):
     # share_encoder_weights: 双流编码器权重共享开关(论文规则1)
     #   False(默认): IR/VIS 两套独立 encoder 权重
     #   True: IR/VIS 共享同一套 encoder 权重
-    use_dsdam = False  # <-- 修改这里切换
+    use_dsdam = True   # 4层DSDAM全开(论文规则3)
     share_encoder_weights = False  # <-- 修改这里切换编码器权重共享
     # ================================================
 
