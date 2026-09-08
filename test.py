@@ -72,6 +72,13 @@ def get_image_files(input_folder):
     valid_extensions = (".bmp", ".tif", ".jpg", ".jpeg", ".png")
     return sorted([f for f in os.listdir(input_folder) if f.lower().endswith(valid_extensions)])
 
+
+def restore_visible_color(visible_bgr, fused_luminance):
+    """Replace only visible luminance so YOLO receives a natural three-channel image."""
+    ycrcb = cv2.cvtColor(visible_bgr, cv2.COLOR_BGR2YCrCb)
+    ycrcb[:, :, 0] = fused_luminance
+    return cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+
 def fusion(input_folder_ir, input_folder_vis, output_folder):
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
@@ -86,9 +93,8 @@ def fusion(input_folder_ir, input_folder_vis, output_folder):
         path2 = os.path.join(input_folder_vis, vis_image)
 
         img1 = cv2.imread(path1, cv2.IMREAD_GRAYSCALE)
-        img2 = cv2.imread(path2, cv2.IMREAD_GRAYSCALE)
-
-        img1, img2 = resize(img1, img2, [256, 256], [256, 256])
+        img2_color = cv2.imread(path2, cv2.IMREAD_COLOR)
+        img2 = cv2.cvtColor(img2_color, cv2.COLOR_BGR2GRAY)
 
         img1 = np.asarray(img1, dtype=np.float32) / 255.0
         img2 = np.asarray(img2, dtype=np.float32) / 255.0
@@ -102,16 +108,10 @@ def fusion(input_folder_ir, input_folder_vis, output_folder):
         model.eval()
         with torch.no_grad():
             out = model(img1_tensor, img2_tensor)
-            ones = torch.ones_like(out)
-            zeros = torch.zeros_like(out)
-            out = torch.where(out > ones, ones, out)
-            out = torch.where(out < zeros, zeros, out)
+            out_np = out.squeeze(0).squeeze(0).cpu().numpy()
 
-            out_np = out.cpu().numpy()
-            out_np = (out_np - np.min(out_np)) / (np.max(out_np) - np.min(out_np))
-
-        d = np.squeeze(out_np)
-        result = (d * 255).astype(np.uint8)
+        result_y = (out_np * 255.0).round().clip(0, 255).astype(np.uint8)
+        result = restore_visible_color(img2_color, result_y)
 
         output_filename = os.path.splitext(ir_image)[0] + os.path.splitext(ir_image)[1]
         output_path = os.path.join(output_folder, output_filename)
@@ -173,7 +173,8 @@ def fusion_fast_test():
             vis_path = vis_dict[fname]
 
             img1 = cv2.imread(ir_path, cv2.IMREAD_GRAYSCALE)
-            img2 = cv2.imread(vis_path, cv2.IMREAD_GRAYSCALE)
+            img2_color = cv2.imread(vis_path, cv2.IMREAD_COLOR)
+            img2 = cv2.cvtColor(img2_color, cv2.COLOR_BGR2GRAY) if img2_color is not None else None
             if img1 is None:
                 raise FileNotFoundError(f"无法读取 IR 图像: {ir_path}")
             if img2 is None:
@@ -193,16 +194,10 @@ def fusion_fast_test():
             model.eval()
             with torch.no_grad():
                 out = model(img1_tensor, img2_tensor)
-                ones = torch.ones_like(out)
-                zeros = torch.zeros_like(out)
-                out = torch.where(out > ones, ones, out)
-                out = torch.where(out < zeros, zeros, out)
+                out_np = out.squeeze(0).squeeze(0).cpu().numpy()
 
-                out_np = out.cpu().numpy()
-                out_np = (out_np - np.min(out_np)) / (np.max(out_np) - np.min(out_np))
-
-            d = np.squeeze(out_np)
-            result = (d * 255).astype(np.uint8)
+            result_y = (out_np * 255.0).round().clip(0, 255).astype(np.uint8)
+            result = restore_visible_color(img2_color, result_y)
 
             output_path = os.path.join(OUTPUT_DIR, fname)
             cv2.imwrite(output_path, result)

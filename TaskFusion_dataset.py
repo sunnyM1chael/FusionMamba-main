@@ -35,35 +35,48 @@ def prepare_data_path(dataset_path):
     return data, filenames
 
 class Fusion_dataset(Dataset):
-    def __init__(self, split, ir_path=None, vi_path=None, length=0):
+    def __init__(self, split, ir_path=None, vi_path=None, length=0, crop_size=256):
         super(Fusion_dataset, self).__init__()
         assert split in ['train', 'val', 'test'], 'split must be "train"|"val"|"test"'
         self.filepath_ir = []
         self.filenames_ir = []
         self.filepath_vis = []
         self.filenames_vis = []
-        self.length = length  # This place can be set up as much as you want to train
+        self.length = length
+        self.crop_size = crop_size
         
         if split == 'train':
-            data_dir_vis = '/mnt/f/A-dataset/KAIST/'  # the path of your data
-            data_dir_ir = '/mnt/f/A-dataset/KAIST/'  # the path of your data
-            dirs = [d for d in os.listdir(data_dir_ir) if not d.startswith('.')]
-            dirs.sort()
-            for dir0 in dirs:
-                subdirs = [d for d in os.listdir(os.path.join(data_dir_ir, dir0)) if not d.startswith('.')]
-                for dir1 in subdirs:
-                    req_path = os.path.join(data_dir_ir, dir0, dir1, 'lwir')
-                    for file in os.listdir(req_path):
-                        if file.startswith('.'):
-                            continue
-                        filepath_ir_ = os.path.join(req_path, file)
-                        self.filepath_ir.append(filepath_ir_)
-                        self.filenames_ir.append(file)
-                        filepath_vis_ = filepath_ir_.replace('lwir', 'visible')
-                        self.filepath_vis.append(filepath_vis_)
-                        self.filenames_vis.append(file)
+            if ir_path and vi_path:
+                ir_files, _ = prepare_data_path(ir_path)
+                vi_files, _ = prepare_data_path(vi_path)
+                ir_by_name = {os.path.basename(path): path for path in ir_files}
+                vi_by_name = {os.path.basename(path): path for path in vi_files}
+                matched = sorted(set(ir_by_name) & set(vi_by_name))
+                if not matched:
+                    raise ValueError(f"No filename-matched IR/VIS pairs in {ir_path} and {vi_path}")
+                self.filepath_ir = [ir_by_name[name] for name in matched]
+                self.filepath_vis = [vi_by_name[name] for name in matched]
+                self.filenames_ir = matched
+                self.filenames_vis = matched
+            else:
+                data_dir_ir = '/mnt/f/A-dataset/KAIST/'
+                dirs = sorted(d for d in os.listdir(data_dir_ir) if not d.startswith('.'))
+                for dir0 in dirs:
+                    subdirs = [d for d in os.listdir(os.path.join(data_dir_ir, dir0)) if not d.startswith('.')]
+                    for dir1 in subdirs:
+                        req_path = os.path.join(data_dir_ir, dir0, dir1, 'lwir')
+                        for file in os.listdir(req_path):
+                            if file.startswith('.'):
+                                continue
+                            filepath_ir_ = os.path.join(req_path, file)
+                            self.filepath_ir.append(filepath_ir_)
+                            self.filenames_ir.append(file)
+                            filepath_vis_ = filepath_ir_.replace('lwir', 'visible')
+                            self.filepath_vis.append(filepath_vis_)
+                            self.filenames_vis.append(file)
             self.split = split
-            # self.length = len(self.filepath_ir)  #if you want to train all data in the dataset
+            available = len(self.filepath_ir)
+            self.length = min(length, available) if length > 0 else available
         elif split == 'test':
             data_dir_vis = vi_path
             data_dir_ir = ir_path
@@ -86,7 +99,27 @@ class Fusion_dataset(Dataset):
             if image_ir is None:
                 raise ValueError(f"Failed to load image at {ir_path}")
 
-            image_ir, image_vis = self.resize(image_ir, image_vis, [256, 256], [256, 256])  
+            if image_ir.shape != image_vis.shape:
+                raise ValueError(
+                    f"Unaligned pair: IR {image_ir.shape} at {ir_path}, VIS {image_vis.shape} at {vis_path}"
+                )
+
+            # Preserve object scale: crop the same region from both modalities
+            # instead of squeezing the complete frame to a 256x256 square.
+            crop = self.crop_size
+            height, width = image_ir.shape
+            if height < crop or width < crop:
+                scale = max(crop / height, crop / width)
+                target = (int(round(height * scale)), int(round(width * scale)))
+                image_ir, image_vis = self.resize(image_ir, image_vis, target, target)
+                height, width = image_ir.shape
+            top = np.random.randint(0, height - crop + 1)
+            left = np.random.randint(0, width - crop + 1)
+            image_ir = image_ir[top:top + crop, left:left + crop]
+            image_vis = image_vis[top:top + crop, left:left + crop]
+            if np.random.rand() < 0.5:
+                image_ir = np.fliplr(image_ir).copy()
+                image_vis = np.fliplr(image_vis).copy()
 
 
             image_vis = np.asarray(Image.fromarray(image_vis), dtype=np.float32) / 255.0

@@ -57,10 +57,27 @@ Apologies, the dataset link has expired. Let me know if you need the dataset, an
 
 
  
- ## 4.Train
+## 4.Train
  
 ```
-python train.py
+python train.py --ir_path /path/to/M3FD/Ir --vis_path /path/to/M3FD/Vis --epochs 100 --batch_size 2
+```
+
+The fusion model uses a fixed `(infrared, visible)` input order. Training uses
+paired random crops to preserve small-target scale instead of resizing a complete
+frame to a square.
+
+### Detection-oriented research modules
+
+- **SACAFM**: joint cross-modal DSDAM offsets align IR/VIS features before DFFM.
+- **ACGAW**: alignment-confidence-guided pixel-channel modality weighting.
+- **ESSD-Head**: energy-guided scale-selective DSDAM with an additional P2 head.
+
+Train the detector from `yolo11_dsdam_deploy` so compatible YOLO11 pretrained
+weights are remapped around the inserted layers:
+
+```
+python train_essd.py --data /path/to/m3fd.yaml --imgsz 640 --epochs 150
 ```
 ## 5.Test
 

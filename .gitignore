@@ -6,8 +6,9 @@ __pycache__/
 *.pth
 *.zip
 
-# Local deployment bundle maintained separately
-yolo11_dsdam_deploy/
+# PDF/code inspection scratch space
+tmp/
+tmp_paper.txt
 
 # Training and test outputs
 model_last/

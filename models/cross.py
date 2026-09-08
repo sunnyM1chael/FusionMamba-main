@@ -1259,6 +1259,66 @@ class eca_layer(nn.Module):
         return x * y.expand_as(x)
 
 
+class AlignmentConfidenceGuidedAdaptiveWeighting(nn.Module):
+    """Pixel-channel modality weighting guided by cross-modal alignment confidence.
+
+    Unlike the original global channel gate, this mechanism predicts complementary
+    IR/VIS weights at every channel and spatial location.  Local contrast provides
+    a lightweight energy prior for small thermal targets.
+    """
+
+    def __init__(self, channels, reduction=4):
+        super().__init__()
+        hidden = max(channels // reduction, 16)
+        joint_channels = channels * 4
+        self.local_projection = nn.Sequential(
+            nn.Conv2d(joint_channels, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1, groups=hidden, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(inplace=True),
+        )
+        self.spatial_logits = nn.Conv2d(hidden, 2, kernel_size=1)
+        self.channel_logits = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(joint_channels, hidden, kernel_size=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, channels * 2, kernel_size=1),
+        )
+        self.temperature = nn.Parameter(torch.tensor(1.0))
+        self.saliency_gain = nn.Parameter(torch.tensor(0.1))
+        nn.init.zeros_(self.spatial_logits.weight)
+        nn.init.zeros_(self.spatial_logits.bias)
+        nn.init.zeros_(self.channel_logits[-1].weight)
+        nn.init.zeros_(self.channel_logits[-1].bias)
+
+    @staticmethod
+    def _local_contrast(x):
+        background = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+        return torch.mean(torch.abs(x - background), dim=1, keepdim=True)
+
+    def forward(self, infrared, visible, alignment_confidence=None):
+        batch, channels, height, width = infrared.shape
+        difference = torch.abs(infrared - visible)
+        joint = torch.cat([infrared, visible, difference, infrared * visible], dim=1)
+
+        spatial = self.spatial_logits(self.local_projection(joint)).view(batch, 2, 1, height, width)
+        channel = self.channel_logits(joint).view(batch, 2, channels, 1, 1)
+        saliency = torch.stack(
+            [self._local_contrast(infrared), self._local_contrast(visible)], dim=1
+        )
+
+        if alignment_confidence is None:
+            alignment_confidence = torch.exp(-torch.mean(difference, dim=1, keepdim=True))
+        confidence = alignment_confidence.clamp(0.0, 1.0).unsqueeze(1)
+        temperature = self.temperature.abs().clamp_min(0.05)
+        logits = ((spatial + channel) * confidence + self.saliency_gain * saliency) / temperature
+        weights = torch.softmax(logits, dim=1)
+        fused = weights[:, 0] * infrared + weights[:, 1] * visible
+        return fused, weights
+
+
 class VSSBlock_Cross_new(nn.Module):
     def __init__(
             self,
@@ -1275,13 +1335,15 @@ class VSSBlock_Cross_new(nn.Module):
         self.Cross_layer = Cross_layer(hidden_dim)
         self.self_attention_cross = SS2D_cross_new(d_model=hidden_dim, dropout=attn_drop_rate, d_state=d_state, **kwargs)
         self.self_attention_cross_spatial = eca_layer(channel=hidden_dim)
+        self.adaptive_weight = AlignmentConfidenceGuidedAdaptiveWeighting(hidden_dim)
         self.drop_path = DropPath(drop_path)
 
-    def forward(self, input1: torch.Tensor, input2:torch.Tensor):
+    def forward(self, input1: torch.Tensor, input2:torch.Tensor, alignment_confidence=None):
         x_1 = input1.permute(0, 3, 1, 2) #(1,64,64,96)
         x_2 = input2.permute(0, 3, 1, 2)  # (1,64,64,96)
 
-        Fuse = torch.add(x_1, x_2, alpha=1)
+        Fuse, modality_weights = self.adaptive_weight(x_1, x_2, alignment_confidence)
+        self.last_modality_weights = modality_weights.detach()
         F_1, F_2 = self.Cross_layer(Fuse, x_1, x_2)
         F_1 = F_1.permute(0, 2, 3, 1)
         F_2 = F_2.permute(0, 2, 3, 1)
@@ -1291,7 +1353,8 @@ class VSSBlock_Cross_new(nn.Module):
         Cross_x1x2_spatial = Cross_x1x2_spatial.permute(0, 2, 3, 1)
 
 
-        x = input2 + input1 + Cross_x1x2 + Cross_x1x2_spatial
+        weighted_fuse = Fuse.permute(0, 2, 3, 1)
+        x = weighted_fuse + Cross_x1x2 + Cross_x1x2_spatial
         return x
 
 class VSSBlock_new(nn.Module):

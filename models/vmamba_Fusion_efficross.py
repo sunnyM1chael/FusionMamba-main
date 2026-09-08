@@ -14,7 +14,7 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 from models.cross import VSSBlock_Cross_new
 from models.cross import VSSBlock_new
-from DSDAM import DSDAM
+from DSDAM import CrossModalDSDAM
 
 try:
     from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
@@ -751,6 +751,32 @@ class VSSLayer_up(nn.Module):
 
 
 
+class SACAFM(nn.Module):
+    """Shape-Adaptive Cross-modal Alignment and Fusion Module."""
+
+    def __init__(self, hidden_dim, use_alignment=True, drop_path=0.0,
+                 norm_layer=nn.LayerNorm, attn_drop_rate=0.0, d_state=16):
+        super().__init__()
+        self.aligner = CrossModalDSDAM(hidden_dim) if use_alignment else None
+        self.fusion = VSSBlock_Cross_new(
+            hidden_dim=hidden_dim,
+            drop_path=drop_path,
+            norm_layer=norm_layer,
+            attn_drop_rate=attn_drop_rate,
+            d_state=d_state,
+        )
+
+    def forward(self, infrared, visible):
+        confidence = None
+        if self.aligner is not None:
+            infrared = infrared.permute(0, 3, 1, 2).contiguous()
+            visible = visible.permute(0, 3, 1, 2).contiguous()
+            infrared, visible, confidence = self.aligner(infrared, visible)
+            infrared = infrared.permute(0, 2, 3, 1).contiguous()
+            visible = visible.permute(0, 2, 3, 1).contiguous()
+        return self.fusion(infrared, visible, confidence)
+
+
 class VSSM_Fusion(nn.Module):
     def __init__(self, patch_size=4, in_chans=1, num_classes=1000, depths=[2, 2, 9, 2], depths_decoder=[2, 9, 2, 2],
                  dims=[96, 192, 384, 768], dims_decoder=[768, 384, 192, 96], d_state=16, drop_rate=0.,
@@ -848,34 +874,19 @@ class VSSM_Fusion(nn.Module):
         self.final_up = Final_PatchExpand2D(dim=dims_decoder[-1], dim_scale=4, norm_layer=norm_layer)
         self.final_conv = nn.Conv2d(dims_decoder[-1] // 4, 1, 1)
 
-        # ===== 论文规则 2: DFFM = DFEM + CMFM 跨模态融合 =====
-        # 【改动点1】Cross_block hidden_dim 改回 dims[i] (修复维度错误)
-        #   之前(错误版): hidden_dim=dims[min(cross_layer+1, num_layers-1)] (stage downsample 后通道)
-        #   现在(修复版): hidden_dim=dims[cross_layer] (stage VSSBlock 输出通道, downsample 之前)
-        # 原因: DFFM 在 stage 内部 VSSBlock 处理后、downsample 之前执行, 此时通道=dims[i]
-        # 论文规则: DFFM 输入输出通道与当前 stage 输出通道(指 VSSBlock 输出, 未 downsample)一致
-        self.Cross_block = nn.ModuleList()
-        for cross_layer in range(self.num_layers):  # 每层一个 DFFM
-            clayer = VSSBlock_Cross_new(
-                hidden_dim=dims[cross_layer],  # = dims[i], 与 stage VSSBlock 输出通道一致
+        # SACAFM unifies joint DSDAM alignment, ACGAW and DFFM at every scale.
+        self.use_dsdam = use_dsdam
+        self.sacafm_layers = nn.ModuleList([
+            SACAFM(
+                hidden_dim=dims[i_layer],
+                use_alignment=use_dsdam,
                 drop_path=drop_rate,
                 norm_layer=norm_layer,
                 attn_drop_rate=attn_drop_rate,
                 d_state=d_state,
             )
-            self.Cross_block.append(clayer)
-
-        # ===== 论文规则 3: DSDAM 可选项, 放置在每层 DFFM 输入之前 =====
-        # 【改动点2】DSDAM 改为 dsdam_layers ModuleList, 4 层独立实例, 移除 dsdam_positions
-        #   之前: dsdam_pre/dsdam_post 单个模块, 仅最深层, 区分 pre/post 位置
-        #   现在: dsdam_layers ModuleList, 4 层各一个, 通道数=dims[i] (与 Cross_block 一致)
-        # DSDAM 为单输入模块: F1_n, F2_n 分别送入同一层 dsdam_layers[i] (共享权重), 不修改 DSDAM.py
-        self.use_dsdam = use_dsdam
-        if self.use_dsdam:
-            self.dsdam_layers = nn.ModuleList()
-            for i_layer in range(self.num_layers):
-                # 通道与 Cross_block 一致 = dims[i] (stage VSSBlock 输出, downsample 之前)
-                self.dsdam_layers.append(DSDAM(in_channels=dims[i_layer], out_channels=dims[i_layer]))
+            for i_layer in range(self.num_layers)
+        ])
 
         self.apply(self._init_weights)
 
@@ -904,22 +915,6 @@ class VSSM_Fusion(nn.Module):
     def no_weight_decay_keywords(self):
         return {'relative_position_bias_table'}
 
-    def _dsdam_apply(self, dsdam_layer, f1, f2):
-        # ===== 论文规则 3: DSDAM 包装函数 (不修改 DSDAM.py 源码) =====
-        # DSDAM 是单输入模块: F1_n, F2_n 分别独立送入同一层 dsdam_layer (共享权重)
-        # 输入两路单模态特征 (B, H, W, C), 输出两路增强特征 (B, H, W, C)
-        # DSDAM 内部不执行任何 concat / 相加 / 跨模态交互
-        # 数据格式转换: (B, H, W, C) -> (B, C, H, W) 供 DSDAM 的 Conv2d/DeformConv2d 处理
-        def _call_single(dsdam_layer, x):
-            x = x.permute(0, 3, 1, 2).contiguous()  # (B, H, W, C) -> (B, C, H, W)
-            x = dsdam_layer(x)                        # DSDAM 单输入前向 (不修改其内部)
-            x = x.permute(0, 2, 3, 1).contiguous()  # (B, C, H, W) -> (B, H, W, C)
-            return x
-
-        f1_aug = _call_single(dsdam_layer, f1)  # IR 单独过 DSDAM
-        f2_aug = _call_single(dsdam_layer, f2)  # VIS 单独过 DSDAM (同一层, 权重共享)
-        return f1_aug, f2_aug
-
     # 【改动点4】移除 forward_features_1 / forward_features_2 / Fusion_network
     #   之前: 两条分支各自独立跑完 4 个 stage, 然后在 decoder skip 路径做 Fusion_network 融合
     #   现在: 改为 forward_encoders 双分支同步推进, 每个 stage 内 VSSBlock 后立即 DFFM 融合
@@ -946,16 +941,8 @@ class VSSM_Fusion(nn.Module):
             # 此时 x1, x2 通道 = dims[i_layer] (未 downsample)
             F1_n, F2_n = x1, x2
 
-            # ===== 论文规则 3: DSDAM 放置在每层 DFFM 输入之前 (可选, use_dsdam 全局控制) =====
-            # 接收本层 Stage VSSBlock 输出的两路单模态特征 F1_n, F2_n, 完成空间对齐增强
-            # DSDAM 是单输入模块, F1_n / F2_n 分别送入同一层 dsdam_layers[i] (共享权重)
-            if self.use_dsdam:
-                F1_n, F2_n = self._dsdam_apply(self.dsdam_layers[i_layer], F1_n, F2_n)
-
-            # ===== 论文规则 2: DFFM = DFEM 动态特征增强 + CMFM 跨模态融合 Mamba =====
-            # VSSBlock_Cross_new 内部含 Cross_layer(DFEM: LDC纹理增强+差分增强) + SS2D_cross_new(CMFM)
-            # 对本层双模态特征 (F1_n, F2_n) 做本尺度的跨模态融合, 通道 = dims[i_layer]
-            X_n = self.Cross_block[i_layer](F1_n, F2_n)
+            # SACAFM: joint deformation alignment -> ACGAW -> DFFM.
+            X_n = self.sacafm_layers[i_layer](F1_n, F2_n)
             # X_n 通道 = dims[i_layer] (与 DFFM 输入一致, 未 downsample)
 
             # ===== downsample: stage 末尾 PatchMerging2D, 把 X_n/F1_n/F2_n 通道翻倍到 dims[i+1] =====
@@ -1032,9 +1019,10 @@ class VSSM_Fusion(nn.Module):
                 x = layer.downsample(x)
         return x
 
-    def forward(self, x1, x2):
-        x_1 = x1  # 保存原始输入用于残差连接
-        x_2 = x2
+    def forward(self, image_ir, image_vis):
+        # Public contract is always (infrared, visible).
+        x1 = image_ir
+        x2 = image_vis
 
         # ===== 论文规则 1: 双流编码器两条独立分支 =====
         # Patch Embed: 各自独立的 patch_embed1(IR) / patch_embed2(VIS)
@@ -1056,8 +1044,8 @@ class VSSM_Fusion(nn.Module):
         # ===== 论文规则 6: 解码器端只做上采样 + VSSBlock, skip 通路无跨模态融合 =====
         x = self.forward_features_up(x, fused_skip_list)
 
-        # 最终输出 + 残差 (保持原始 forward_final 的残差结构)
-        x = self.forward_final(x) + x_1 + x_2 + x_1 + x_2
+        # Bounded prediction avoids hard-clamp saturation and keeps gradients alive.
+        x = torch.sigmoid(self.forward_final(x))
 
         return x
 
@@ -1072,10 +1060,6 @@ class VSSM_Fusion(nn.Module):
 #     x2 = torch.rand((4, 1, 256, 256)).cuda()
 #     a = net(x1, x2).cuda()
 #     print(a.shape)
-
-
-
-
 
 
 

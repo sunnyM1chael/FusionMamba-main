@@ -75,11 +75,12 @@ def YCrCb2RGB(input_im):
     )
     return out
 
-def train_fusion(num=0, logger=None):
+def train_fusion(num=0, logger=None, args=None):
     lr_start = 0.0002
     modelpth = 'model_last'
     Method = 'my_cross'
     modelpth = os.path.join(modelpth, Method)
+    os.makedirs(modelpth, exist_ok=True)
     
     # ========== 消融实验开关：直接在这里修改 ==========
     # use_dsdam: 是否使用DSDAM模块（False=不使用，True=使用）
@@ -87,7 +88,7 @@ def train_fusion(num=0, logger=None):
     # share_encoder_weights: 双流编码器权重共享开关(论文规则1)
     #   False(默认): IR/VIS 两套独立 encoder 权重
     #   True: IR/VIS 共享同一套 encoder 权重
-    use_dsdam = True   # 4层DSDAM全开(论文规则3)
+    use_dsdam = not args.disable_dsdam if args is not None else True
     share_encoder_weights = False  # <-- 修改这里切换编码器权重共享
     # ================================================
 
@@ -98,13 +99,19 @@ def train_fusion(num=0, logger=None):
     fusionmodel.cuda()
     fusionmodel.train()
     optimizer = torch.optim.Adam(fusionmodel.parameters(), lr=lr_start)
-    train_dataset = Fusion_dataset('train',length=30000)
+    train_dataset = Fusion_dataset(
+        'train',
+        ir_path=args.ir_path if args is not None else None,
+        vi_path=args.vis_path if args is not None else None,
+        length=args.length if args is not None else 30000,
+        crop_size=args.crop_size if args is not None else 256,
+    )
     print("the training dataset is length:{}".format(train_dataset.length))
     train_loader = DataLoader(
         dataset=train_dataset,
-        batch_size=2,
+        batch_size=args.batch_size if args is not None else 2,
         shuffle=True,
-        num_workers=8,
+        num_workers=args.num_workers if args is not None else 8,
         pin_memory=True,
         drop_last=True,
     )
@@ -120,7 +127,7 @@ def train_fusion(num=0, logger=None):
         'ssim_loss': []
     }
 
-    epoch = 2
+    epoch = args.epochs if args is not None else 2
     st = glob_st = time.time()
     logger.info('Training Fusion Model start~')
     for epo in range(0, epoch):
@@ -131,21 +138,13 @@ def train_fusion(num=0, logger=None):
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr_this_epo
         for it, (image_vis, image_ir) in enumerate(train_loader):
-            try:
-                fusionmodel.train()
-                image_vis = Variable(image_vis).cuda()
-                # image_vis_ycrcb = image_vis[:,0:1:,:,:]
-                image_ir = Variable(image_ir).cuda()
-                fusion_image = fusionmodel(image_vis, image_ir)
+            fusionmodel.train()
+            image_vis = Variable(image_vis).cuda()
+            # image_vis_ycrcb = image_vis[:,0:1:,:,:]
+            image_ir = Variable(image_ir).cuda()
+            # The model contract is always (infrared, visible).
+            fusion_image = fusionmodel(image_ir, image_vis)
 
-            except TypeError as e:
-                print(f"Caught TypeError: {e}")
-
-
-            ones = torch.ones_like(fusion_image)
-            zeros = torch.zeros_like(fusion_image)
-            fusion_image = torch.where(fusion_image > ones, ones, fusion_image)
-            fusion_image = torch.where(fusion_image < zeros, zeros, fusion_image)
             optimizer.zero_grad()
 
 
@@ -268,11 +267,17 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', '-B', type=int, default=1)
     parser.add_argument('--gpu', '-G', type=int, default=0)
     parser.add_argument('--num_workers', '-j', type=int, default=1)
+    parser.add_argument('--ir_path', type=str, default=None, help='Training infrared image directory')
+    parser.add_argument('--vis_path', type=str, default=None, help='Training visible image directory')
+    parser.add_argument('--length', type=int, default=0, help='Maximum paired images; 0 uses all')
+    parser.add_argument('--crop_size', type=int, default=256, help='Aligned random crop size')
+    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--disable_dsdam', action='store_true', help='Ablate SACAFM alignment')
     args = parser.parse_args()
     logpath='./logs'
     logger = logging.getLogger()
     setup_logger(logpath)
     for i in range(1):
-        train_fusion(i, logger)
+        train_fusion(i, logger, args)
         print("|{0} Train Fusion Model Sucessfully~!".format(i + 1))
     print("training Done!")
