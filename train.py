@@ -112,6 +112,12 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
     )
 
 
+def load_pretrained(path, model, device):
+    checkpoint = torch.load(path, map_location=device)
+    state = checkpoint.get('model', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    model.load_state_dict(state)
+
+
 def plot_history(history, output_path):
     if not history:
         return
@@ -145,6 +151,8 @@ def plot_history(history, output_path):
 def train_fusion(args, logger):
     if not args.kaist_root and (not args.ir_path or not args.vis_path):
         raise ValueError('Provide --ir_path/--vis_path or --kaist_root')
+    if args.resume and args.pretrained:
+        raise ValueError('Use only one of --resume and --pretrained')
     from models.vmamba_Fusion_efficross import VSSM_Fusion
 
     set_seed(args.seed)
@@ -171,6 +179,10 @@ def train_fusion(args, logger):
         optimizer, T_max=max(args.epochs, 1), eta_min=args.min_lr
     )
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
+
+    if args.pretrained:
+        load_pretrained(args.pretrained, model, device)
+        logger.info('Loaded model weights from %s without optimizer state', args.pretrained)
 
     train_set = Fusion_dataset(
         'train', args.ir_path, args.vis_path, args.length, args.crop_size, args.train_list, args.kaist_root
@@ -284,6 +296,7 @@ def parse_args():
     parser.add_argument('--val_list', help='Text file containing validation filenames')
     parser.add_argument('--output_dir', default='runs/fusion/sacafm')
     parser.add_argument('--resume', help='Path to a resumable checkpoint')
+    parser.add_argument('--pretrained', help='Model checkpoint for fine-tuning; optimizer starts fresh')
     parser.add_argument('--length', type=int, default=0, help='Maximum training pairs; 0 uses all')
     parser.add_argument('--crop_size', type=int, default=256)
     parser.add_argument('--epochs', type=int, default=100)
