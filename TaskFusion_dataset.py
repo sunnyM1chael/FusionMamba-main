@@ -35,7 +35,15 @@ def prepare_data_path(dataset_path):
     return data, filenames
 
 class Fusion_dataset(Dataset):
-    def __init__(self, split, ir_path=None, vi_path=None, length=0, crop_size=256):
+    def __init__(
+        self,
+        split,
+        ir_path=None,
+        vi_path=None,
+        length=0,
+        crop_size=256,
+        split_file=None,
+    ):
         super(Fusion_dataset, self).__init__()
         assert split in ['train', 'val', 'test'], 'split must be "train"|"val"|"test"'
         self.filepath_ir = []
@@ -45,20 +53,33 @@ class Fusion_dataset(Dataset):
         self.length = length
         self.crop_size = crop_size
         
-        if split == 'train':
-            if ir_path and vi_path:
-                ir_files, _ = prepare_data_path(ir_path)
-                vi_files, _ = prepare_data_path(vi_path)
-                ir_by_name = {os.path.basename(path): path for path in ir_files}
-                vi_by_name = {os.path.basename(path): path for path in vi_files}
-                matched = sorted(set(ir_by_name) & set(vi_by_name))
-                if not matched:
-                    raise ValueError(f"No filename-matched IR/VIS pairs in {ir_path} and {vi_path}")
-                self.filepath_ir = [ir_by_name[name] for name in matched]
-                self.filepath_vis = [vi_by_name[name] for name in matched]
-                self.filenames_ir = matched
-                self.filenames_vis = matched
-            else:
+        if ir_path and vi_path:
+            ir_files, _ = prepare_data_path(ir_path)
+            vi_files, _ = prepare_data_path(vi_path)
+            ir_by_name = {os.path.basename(path): path for path in ir_files}
+            vi_by_name = {os.path.basename(path): path for path in vi_files}
+            matched = sorted(set(ir_by_name) & set(vi_by_name))
+            if split_file:
+                with open(split_file, 'r', encoding='utf-8') as handle:
+                    selected = {
+                        os.path.basename(line.strip())
+                        for line in handle
+                        if line.strip() and not line.lstrip().startswith('#')
+                    }
+                missing = sorted(selected - set(matched))
+                if missing:
+                    sample = ', '.join(missing[:5])
+                    raise ValueError(f"{len(missing)} split entries have no IR/VIS pair, e.g. {sample}")
+                matched = [name for name in matched if name in selected]
+            if not matched:
+                raise ValueError(f"No filename-matched IR/VIS pairs in {ir_path} and {vi_path}")
+            self.filepath_ir = [ir_by_name[name] for name in matched]
+            self.filepath_vis = [vi_by_name[name] for name in matched]
+            self.filenames_ir = matched
+            self.filenames_vis = matched
+        elif split == 'train':
+            # Backward-compatible KAIST layout. Explicit paths are recommended.
+            if not ir_path and not vi_path:
                 data_dir_ir = '/mnt/f/A-dataset/KAIST/'
                 dirs = sorted(d for d in os.listdir(data_dir_ir) if not d.startswith('.'))
                 for dir0 in dirs:
@@ -74,36 +95,29 @@ class Fusion_dataset(Dataset):
                             filepath_vis_ = filepath_ir_.replace('lwir', 'visible')
                             self.filepath_vis.append(filepath_vis_)
                             self.filenames_vis.append(file)
-            self.split = split
-            available = len(self.filepath_ir)
-            self.length = min(length, available) if length > 0 else available
-        elif split == 'test':
-            data_dir_vis = vi_path
-            data_dir_ir = ir_path
-            self.filepath_vis, self.filenames_vis = prepare_data_path(data_dir_vis)
-            self.filepath_ir, self.filenames_ir = prepare_data_path(data_dir_ir)
-            self.split = split
+        else:
+            raise ValueError('ir_path and vi_path are required for validation and testing')
+
+        self.split = split
+        available = len(self.filepath_ir)
+        self.length = min(length, available) if length > 0 else available
 
     def __getitem__(self, index):
+        vis_path = self.filepath_vis[index]
+        ir_path = self.filepath_ir[index]
+        image_vis_color = cv2.imread(vis_path, cv2.IMREAD_COLOR)
+        if image_vis_color is None:
+            raise ValueError(f"Failed to load image at {vis_path}")
+        image_vis = cv2.cvtColor(image_vis_color, cv2.COLOR_BGR2GRAY)
+        image_ir = cv2.imread(ir_path, cv2.IMREAD_GRAYSCALE)
+        if image_ir is None:
+            raise ValueError(f"Failed to load image at {ir_path}")
+        if image_ir.shape != image_vis.shape:
+            raise ValueError(
+                f"Unaligned pair: IR {image_ir.shape} at {ir_path}, VIS {image_vis.shape} at {vis_path}"
+            )
+
         if self.split == 'train':
-            vis_path = self.filepath_vis[index]
-            ir_path = self.filepath_ir[index]
-
-            image_vis = cv2.imread(vis_path)
-            image_vis = cv2.cvtColor(image_vis, cv2.COLOR_BGR2GRAY)
-            # if image_vis is None:
-            #     raise ValueError(f"Failed to load image at {vis_path}")
-            # image_vis = cv2.cvtColor(image_vis, cv2.COLOR_BGR2GRAY)
-
-            image_ir = cv2.imread(ir_path,0)
-            if image_ir is None:
-                raise ValueError(f"Failed to load image at {ir_path}")
-
-            if image_ir.shape != image_vis.shape:
-                raise ValueError(
-                    f"Unaligned pair: IR {image_ir.shape} at {ir_path}, VIS {image_vis.shape} at {vis_path}"
-                )
-
             # Preserve object scale: crop the same region from both modalities
             # instead of squeezing the complete frame to a 256x256 square.
             crop = self.crop_size
@@ -122,40 +136,12 @@ class Fusion_dataset(Dataset):
                 image_vis = np.fliplr(image_vis).copy()
 
 
-            image_vis = np.asarray(Image.fromarray(image_vis), dtype=np.float32) / 255.0
-            image_vis = np.expand_dims(image_vis, axis=0)
-
-            image_ir = np.asarray(Image.fromarray(image_ir), dtype=np.float32) / 255.0
-            image_ir = np.expand_dims(image_ir, axis=0)
-
-            name = self.filenames_vis[index]
-            return (
-                torch.tensor(image_vis),
-                torch.tensor(image_ir),
-            )
-        elif self.split == 'test':
-            vis_path = self.filepath_vis[index]
-            ir_path = self.filepath_ir[index]
-            image_vis = cv2.imread(vis_path)
-            gray_image = cv2.cvtColor(vis_image, cv2.COLOR_BGR2GRAY)
-            if image_vis is None:
-                raise ValueError(f"Failed to load image at {vis_path}")
-
-            image_ir = cv2.imread(ir_path, 0)
-            if image_ir is None:
-                raise ValueError(f"Failed to load image at {ir_path}")
-
-            # image_vis = np.asarray(Image.fromarray(image_vis), dtype=np.float32).transpose((2, 0, 1)) / 255.0
-            image_vis = np.asarray(Image.fromarray(image_vis), dtype=np.float32) / 255.0
-            image_vis = np.expand_dims(image_vis, axis=0)
-            image_ir = np.asarray(Image.fromarray(image_ir), dtype=np.float32) / 255.0
-            image_ir = np.expand_dims(image_ir, axis=0)
-
-            name = self.filenames_vis[index]
-            return (
-                torch.tensor(image_vis),
-                torch.tensor(image_ir),
-            )
+        image_vis = np.ascontiguousarray(image_vis, dtype=np.float32) / 255.0
+        image_ir = np.ascontiguousarray(image_ir, dtype=np.float32) / 255.0
+        return (
+            torch.from_numpy(image_vis).unsqueeze(0),
+            torch.from_numpy(image_ir).unsqueeze(0),
+        )
 
     def __len__(self):
         return self.length

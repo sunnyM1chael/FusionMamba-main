@@ -60,12 +60,32 @@ Apologies, the dataset link has expired. Let me know if you need the dataset, an
 ## 4.Train
  
 ```
-python train.py --ir_path /path/to/M3FD/Ir --vis_path /path/to/M3FD/Vis --epochs 100 --batch_size 2
+python prepare_splits.py --ir_path /path/to/M3FD/Ir --vis_path /path/to/M3FD/Vis --output_dir splits/m3fd
+python train.py --ir_path /path/to/M3FD/Ir --vis_path /path/to/M3FD/Vis \
+  --train_list splits/m3fd/train.txt --val_list splits/m3fd/val.txt \
+  --output_dir runs/fusion/sacafm --epochs 100 --batch_size 4 --amp
 ```
 
 The fusion model uses a fixed `(infrared, visible)` input order. Training uses
 paired random crops to preserve small-target scale instead of resizing a complete
 frame to a square.
+
+Training writes `best.pth`, `last.pth`, the exact arguments and JSON loss history.
+Resume an interrupted run with `--resume runs/fusion/sacafm/last.pth`.
+
+Generate fused images for each fixed split and evaluate them without per-image
+min-max normalization:
+
+```
+python generate_fused_dataset.py --checkpoint runs/fusion/sacafm/best.pth \
+  --ir_path /path/to/M3FD/Ir --vis_path /path/to/M3FD/Vis \
+  --split_file splits/m3fd/test.txt --output_dir datasets/M3FD_fused/images/test
+python evaluate_fusion.py --ir_path /path/to/M3FD/Ir --vis_path /path/to/M3FD/Vis \
+  --fused_path datasets/M3FD_fused/images/test --output runs/fusion/sacafm/test_metrics.json
+```
+
+For controlled alignment robustness, create perturbed visible inputs with
+`create_misaligned_pairs.py` (for example `--translate_x 4`) and repeat inference.
 
 ### Detection-oriented research modules
 
@@ -77,7 +97,7 @@ Train the detector from `yolo11_dsdam_deploy` so compatible YOLO11 pretrained
 weights are remapped around the inserted layers:
 
 ```
-python train_essd.py --data /path/to/m3fd.yaml --imgsz 640 --epochs 150
+python train_essd.py --data ultralytics/cfg/datasets/M3FD-Fused.yaml --imgsz 640 --epochs 150
 ```
 ## 5.Test
 

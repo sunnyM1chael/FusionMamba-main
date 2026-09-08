@@ -1,0 +1,13 @@
+# M3FD fused-image detection dataset. Change `path` to the generated dataset root.
+path: /path/to/M3FD_fused
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: People
+  1: Car
+  2: Bus
+  3: Motorcycle
+  4: Lamp
+  5: Truck

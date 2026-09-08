@@ -1,283 +1,306 @@
 #!/usr/bin/python
 # -*- encoding: utf-8 -*-
-from PIL import Image
-import numpy as np
-from glob import glob
-from torch.autograd import Variable
-from models.vmamba_Fusion_efficross import VSSM_Fusion
-from TaskFusion_dataset import Fusion_dataset
+"""Reproducible FusionMamba training with validation and resumable checkpoints."""
+
 import argparse
-import datetime
-import time
+import json
 import logging
-import os.path as osp
 import os
-from logger import setup_logger
+import random
+import time
+from pathlib import Path
 
-
-from loss import Fusionloss
-
+import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import warnings
-warnings.filterwarnings('ignore')
 
-def parse_args():
-    parse = argparse.ArgumentParser()
-    parse.add_argument('--use_dsdam', action='store_true', default=False,
-                       help='Use DSDAM module in the model')
-    parse.add_argument('--dsdam_position', type=str, default='pre',
-                       choices=['pre', 'post', 'both'],
-                       help='Position of DSDAM: pre (before fusion), post (after fusion), both')
-    return parse.parse_args()
+from logger import setup_logger
+from loss import Fusionloss
+from TaskFusion_dataset import Fusion_dataset
 
-def RGB2YCrCb(input_im):
-    im_flat = input_im.transpose(1, 3).transpose(
-        1, 2).reshape(-1, 3)  # (nhw,c)
-    R = im_flat[:, 0]
-    G = im_flat[:, 1]
-    B = im_flat[:, 2]
-    Y = 0.299 * R + 0.587 * G + 0.114 * B
-    Cr = (R - Y) * 0.713 + 0.5
-    Cb = (B - Y) * 0.564 + 0.5
-    Y = torch.unsqueeze(Y, 1)
-    Cr = torch.unsqueeze(Cr, 1)
-    Cb = torch.unsqueeze(Cb, 1)
-    temp = torch.cat((Y, Cr, Cb), dim=1).cuda()
-    out = (
-        temp.reshape(
-            list(input_im.size())[0],
-            list(input_im.size())[2],
-            list(input_im.size())[3],
-            3,
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def build_loader(dataset, batch_size, workers, shuffle, seed):
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=shuffle and len(dataset) >= batch_size,
+        worker_init_fn=seed_worker,
+        generator=generator,
+    )
+
+
+def compute_loss(model, criterion, image_vis, image_ir, device, amp):
+    image_vis = image_vis.to(device, non_blocking=True)
+    image_ir = image_ir.to(device, non_blocking=True)
+    height, width = image_ir.shape[-2:]
+    pad_h, pad_w = (-height) % 32, (-width) % 32
+    model_vis = F.pad(image_vis, (0, pad_w, 0, pad_h), mode='replicate') if pad_h or pad_w else image_vis
+    model_ir = F.pad(image_ir, (0, pad_w, 0, pad_h), mode='replicate') if pad_h or pad_w else image_ir
+    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp):
+        fusion_image = model(model_ir, model_vis)[..., :height, :width]
+        total, intensity, ssim, gradient = criterion(
+            image_vis=image_vis,
+            image_ir=image_ir,
+            generate_img=fusion_image,
+            i=0,
+            labels=None,
         )
-        .transpose(1, 3)
-        .transpose(2, 3)
+    return total, intensity, ssim, gradient
+
+
+@torch.no_grad()
+def validate(model, loader, criterion, device, amp):
+    model.eval()
+    totals = np.zeros(4, dtype=np.float64)
+    for image_vis, image_ir in loader:
+        losses = compute_loss(model, criterion, image_vis, image_ir, device, amp)
+        totals += np.asarray([loss.item() for loss in losses])
+    return totals / max(len(loader), 1)
+
+
+def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best_val, history, args):
+    torch.save(
+        {
+            'epoch': epoch,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'scaler': scaler.state_dict(),
+            'best_val': best_val,
+            'history': history,
+            'args': vars(args),
+        },
+        path,
     )
-    return out
 
-def YCrCb2RGB(input_im):
-    im_flat = input_im.transpose(1, 3).transpose(1, 2).reshape(-1, 3)
-    mat = torch.tensor(
-        [[1.0, 1.0, 1.0], [1.403, -0.714, 0.0], [0.0, -0.344, 1.773]]
-    ).cuda()
-    bias = torch.tensor([0.0 / 255, -0.5, -0.5]).cuda()
-    temp = (im_flat + bias).mm(mat).cuda()
-    out = (
-        temp.reshape(
-            list(input_im.size())[0],
-            list(input_im.size())[2],
-            list(input_im.size())[3],
-            3,
-        )
-        .transpose(1, 3)
-        .transpose(2, 3)
+
+def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
+    checkpoint = torch.load(path, map_location=device)
+    if 'model' not in checkpoint:
+        model.load_state_dict(checkpoint)
+        return 0, float('inf'), []
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    scheduler.load_state_dict(checkpoint['scheduler'])
+    if checkpoint.get('scaler'):
+        scaler.load_state_dict(checkpoint['scaler'])
+    return (
+        int(checkpoint.get('epoch', -1)) + 1,
+        float(checkpoint.get('best_val', float('inf'))),
+        checkpoint.get('history', []),
     )
-    return out
-
-def train_fusion(num=0, logger=None, args=None):
-    lr_start = 0.0002
-    modelpth = 'model_last'
-    Method = 'my_cross'
-    modelpth = os.path.join(modelpth, Method)
-    os.makedirs(modelpth, exist_ok=True)
-    
-    # ========== 消融实验开关：直接在这里修改 ==========
-    # use_dsdam: 是否使用DSDAM模块（False=不使用，True=使用）
-    # DSDAM 统一放置在每层 DFFM 输入之前(论文规则3), 不再区分 pre/post 位置
-    # share_encoder_weights: 双流编码器权重共享开关(论文规则1)
-    #   False(默认): IR/VIS 两套独立 encoder 权重
-    #   True: IR/VIS 共享同一套 encoder 权重
-    use_dsdam = not args.disable_dsdam if args is not None else True
-    share_encoder_weights = False  # <-- 修改这里切换编码器权重共享
-    # ================================================
-
-    fusionmodel = VSSM_Fusion(use_dsdam=use_dsdam, share_encoder_weights=share_encoder_weights)
-    print(f"Model: use_dsdam={use_dsdam}, DSDAM位置=每层DFFM输入前(论文规则3), "
-          f"share_encoder_weights={share_encoder_weights}")
-    
-    fusionmodel.cuda()
-    fusionmodel.train()
-    optimizer = torch.optim.Adam(fusionmodel.parameters(), lr=lr_start)
-    train_dataset = Fusion_dataset(
-        'train',
-        ir_path=args.ir_path if args is not None else None,
-        vi_path=args.vis_path if args is not None else None,
-        length=args.length if args is not None else 30000,
-        crop_size=args.crop_size if args is not None else 256,
-    )
-    print("the training dataset is length:{}".format(train_dataset.length))
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=args.batch_size if args is not None else 2,
-        shuffle=True,
-        num_workers=args.num_workers if args is not None else 8,
-        pin_memory=True,
-        drop_last=True,
-    )
-    train_loader.n_iter = len(train_loader)
-    criteria_fusion = Fusionloss()
-    
-    # 用于记录损失历史
-    loss_history = {
-        'step': [],
-        'loss_total': [],
-        'loss_in': [],
-        'loss_grad': [],
-        'ssim_loss': []
-    }
-
-    epoch = args.epochs if args is not None else 2
-    st = glob_st = time.time()
-    logger.info('Training Fusion Model start~')
-    for epo in range(0, epoch):
-        # print('\n| epo #%s begin...' % epo)
-        lr_start = 0.0001
-        lr_decay = 0.75
-        lr_this_epo = lr_start * lr_decay ** (epo - 1)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr_this_epo
-        for it, (image_vis, image_ir) in enumerate(train_loader):
-            fusionmodel.train()
-            image_vis = Variable(image_vis).cuda()
-            # image_vis_ycrcb = image_vis[:,0:1:,:,:]
-            image_ir = Variable(image_ir).cuda()
-            # The model contract is always (infrared, visible).
-            fusion_image = fusionmodel(image_ir, image_vis)
-
-            optimizer.zero_grad()
 
 
-            # fusion loss
-            loss_fusion,  loss_in, ssim_loss, loss_grad= criteria_fusion(
-                image_vis=image_vis, image_ir=image_ir, generate_img=
-                fusion_image, i=num, labels=None
-            )
-
-
-
-            loss_total = loss_fusion
-            loss_total.backward()
-            optimizer.step()
-            ed = time.time()
-            t_intv, glob_t_intv = ed - st, ed - glob_st
-            now_it = train_loader.n_iter * epo + it + 1
-            eta = int((train_loader.n_iter * epoch - now_it)
-                      * (glob_t_intv / (now_it)))
-            eta = str(datetime.timedelta(seconds=eta))
-            if now_it % 10 == 0:
-                msg = ', '.join(
-                    [
-                        'step: {it}/{max_it}',
-                        'loss_total: {loss_total:.4f}',
-                        'loss_in: {loss_in:.4f}',
-                        'loss_grad: {loss_grad:.4f}',
-                        'ssim_loss: {ssim_loss:.4f}',
-                        'eta: {eta}',
-                        'time: {time:.4f}',
-                    ]
-                ).format(
-                    it=now_it,
-                    max_it=train_loader.n_iter * epoch,
-                    loss_total=loss_total.item(),
-                    loss_in=loss_in.item(),
-                    loss_grad=loss_grad.item(),
-                    ssim_loss=ssim_loss.item(),
-                    time=t_intv,
-                    eta=eta,
-                )
-                logger.info(msg)
-                st = ed
-                
-                # 记录损失历史
-                loss_history['step'].append(now_it)
-                loss_history['loss_total'].append(loss_total.item())
-                loss_history['loss_in'].append(loss_in.item())
-                loss_history['loss_grad'].append(loss_grad.item())
-                loss_history['ssim_loss'].append(ssim_loss.item())
-                
-    fusion_model_file = os.path.join(modelpth, 'fusion_model.pth')
-    torch.save(fusionmodel.state_dict(), fusion_model_file)
-    logger.info("Fusion Model Save to: {}".format(fusion_model_file))
-    logger.info('\n')
-    
-    # 保存损失历史
-    loss_history_file = os.path.join(modelpth, 'loss_history.pth')
-    torch.save(loss_history, loss_history_file)
-    print(f"Loss history saved to: {loss_history_file}")
-    
-    # 绘制损失曲线
+def plot_history(history, output_path):
+    if not history:
+        return
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle(f'Training Loss Curves (use_dsdam={use_dsdam})', fontsize=14)
-        
-        steps = loss_history['step']
-        
-        axes[0, 0].plot(steps, loss_history['loss_total'], 'b-', linewidth=1.5)
-        axes[0, 0].set_xlabel('Step')
-        axes[0, 0].set_ylabel('Total Loss')
-        axes[0, 0].set_title('Total Loss')
-        axes[0, 0].grid(True)
-        
-        axes[0, 1].plot(steps, loss_history['loss_in'], 'r-', linewidth=1.5)
-        axes[0, 1].set_xlabel('Step')
-        axes[0, 1].set_ylabel('Intensity Loss')
-        axes[0, 1].set_title('Intensity Preservation Loss')
-        axes[0, 1].grid(True)
-        
-        axes[1, 0].plot(steps, loss_history['loss_grad'], 'g-', linewidth=1.5)
-        axes[1, 0].set_xlabel('Step')
-        axes[1, 0].set_ylabel('Gradient Loss')
-        axes[1, 0].set_title('Gradient Preservation Loss')
-        axes[1, 0].grid(True)
-        
-        axes[1, 1].plot(steps, loss_history['ssim_loss'], 'm-', linewidth=1.5)
-        axes[1, 1].set_xlabel('Step')
-        axes[1, 1].set_ylabel('SSIM Loss')
-        axes[1, 1].set_title('SSIM Loss')
-        axes[1, 1].grid(True)
-        
-        plt.tight_layout()
-        save_path = os.path.join(modelpth, 'loss_curves.png')
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"Loss curves saved to: {save_path}")
-        
-        # 打印最终损失值
-        if len(loss_history['loss_total']) > 0:
-            print("\n" + "="*50)
-            print("Final Loss Values:")
-            print(f"  Total Loss:  {loss_history['loss_total'][-1]:.6f}")
-            print(f"  Intensity:   {loss_history['loss_in'][-1]:.6f}")
-            print(f"  Gradient:    {loss_history['loss_grad'][-1]:.6f}")
-            print(f"  SSIM:        {loss_history['ssim_loss'][-1]:.6f}")
-            print("="*50 + "\n")
-            
     except ImportError:
-        print("matplotlib not installed, skipping loss curve plot")
+        return
+
+    epochs = [item['epoch'] for item in history]
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    for axis, key, title in zip(
+        axes.flat,
+        ('total', 'intensity', 'gradient', 'ssim'),
+        ('Total loss', 'Intensity loss', 'Gradient loss', 'SSIM loss'),
+    ):
+        axis.plot(epochs, [item[f'train_{key}'] for item in history], label='train')
+        valid = [item.get(f'val_{key}') for item in history]
+        if all(value is not None for value in valid):
+            axis.plot(epochs, valid, label='val')
+        axis.set_title(title)
+        axis.set_xlabel('epoch')
+        axis.grid(True)
+        axis.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train with pytorch')
-    parser.add_argument('--model_name', '-M', type=str, default='VSSM_Fusion')
-    parser.add_argument('--batch_size', '-B', type=int, default=1)
-    parser.add_argument('--gpu', '-G', type=int, default=0)
-    parser.add_argument('--num_workers', '-j', type=int, default=1)
-    parser.add_argument('--ir_path', type=str, default=None, help='Training infrared image directory')
-    parser.add_argument('--vis_path', type=str, default=None, help='Training visible image directory')
-    parser.add_argument('--length', type=int, default=0, help='Maximum paired images; 0 uses all')
-    parser.add_argument('--crop_size', type=int, default=256, help='Aligned random crop size')
+def train_fusion(args, logger):
+    from models.vmamba_Fusion_efficross import VSSM_Fusion
+
+    set_seed(args.seed)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / 'train_args.json').open('w', encoding='utf-8') as handle:
+        json.dump(vars(args), handle, ensure_ascii=False, indent=2)
+
+    if torch.cuda.is_available() and args.device != 'cpu':
+        device = torch.device(f'cuda:{args.device}')
+    else:
+        device = torch.device('cpu')
+    amp = args.amp and device.type == 'cuda'
+
+    model = VSSM_Fusion(
+        use_dsdam=not args.disable_dsdam,
+        share_encoder_weights=args.share_encoder_weights,
+    ).to(device)
+    criterion = Fusionloss().to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(args.epochs, 1), eta_min=args.min_lr
+    )
+    scaler = torch.cuda.amp.GradScaler(enabled=amp)
+
+    train_set = Fusion_dataset(
+        'train', args.ir_path, args.vis_path, args.length, args.crop_size, args.train_list
+    )
+    train_loader = build_loader(
+        train_set, args.batch_size, args.num_workers, True, args.seed
+    )
+
+    val_loader = None
+    if args.val_list:
+        val_set = Fusion_dataset(
+            'val', args.ir_path, args.vis_path, 0, args.crop_size, args.val_list
+        )
+        val_loader = build_loader(val_set, 1, args.num_workers, False, args.seed)
+
+    start_epoch, best_val, history = 0, float('inf'), []
+    if args.resume:
+        start_epoch, best_val, history = load_checkpoint(
+            args.resume, model, optimizer, scheduler, scaler, device
+        )
+        logger.info('Resumed %s at epoch %d', args.resume, start_epoch)
+
+    logger.info(
+        'Start: device=%s amp=%s train=%d val=%d SACAFM=%s',
+        device,
+        amp,
+        len(train_set),
+        len(val_loader.dataset) if val_loader else 0,
+        not args.disable_dsdam,
+    )
+
+    for epoch in range(start_epoch, args.epochs):
+        model.train()
+        sums = np.zeros(4, dtype=np.float64)
+        started = time.time()
+        for step, (image_vis, image_ir) in enumerate(train_loader, start=1):
+            optimizer.zero_grad(set_to_none=True)
+            losses = compute_loss(model, criterion, image_vis, image_ir, device, amp)
+            scaler.scale(losses[0]).backward()
+            if args.grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            sums += np.asarray([loss.item() for loss in losses])
+            if step % args.log_interval == 0:
+                logger.info(
+                    'epoch %d/%d step %d/%d loss %.5f lr %.2e',
+                    epoch + 1,
+                    args.epochs,
+                    step,
+                    len(train_loader),
+                    losses[0].item(),
+                    optimizer.param_groups[0]['lr'],
+                )
+
+        train_values = sums / max(len(train_loader), 1)
+        val_values = (
+            validate(model, val_loader, criterion, device, amp)
+            if val_loader is not None
+            else None
+        )
+        record = {
+            'epoch': epoch + 1,
+            'lr': optimizer.param_groups[0]['lr'],
+            'train_total': float(train_values[0]),
+            'train_intensity': float(train_values[1]),
+            'train_ssim': float(train_values[2]),
+            'train_gradient': float(train_values[3]),
+            'val_total': float(val_values[0]) if val_values is not None else None,
+            'val_intensity': float(val_values[1]) if val_values is not None else None,
+            'val_ssim': float(val_values[2]) if val_values is not None else None,
+            'val_gradient': float(val_values[3]) if val_values is not None else None,
+        }
+        history.append(record)
+        monitored = record['val_total'] if val_values is not None else record['train_total']
+        improved = monitored < best_val
+        if improved:
+            best_val = monitored
+        scheduler.step()
+        save_checkpoint(
+            output_dir / 'last.pth', model, optimizer, scheduler, scaler,
+            epoch, best_val, history, args
+        )
+        if improved:
+            save_checkpoint(
+                output_dir / 'best.pth', model, optimizer, scheduler, scaler,
+                epoch, best_val, history, args
+            )
+        with (output_dir / 'history.json').open('w', encoding='utf-8') as handle:
+            json.dump(history, handle, ensure_ascii=False, indent=2)
+        plot_history(history, output_dir / 'loss_curves.png')
+        logger.info(
+            'epoch %d train=%.5f val=%s best=%.5f time=%.1fs',
+            epoch + 1,
+            record['train_total'],
+            f"{record['val_total']:.5f}" if record['val_total'] is not None else 'N/A',
+            best_val,
+            time.time() - started,
+        )
+
+    logger.info('Training complete. Best checkpoint: %s', output_dir / 'best.pth')
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train SACAFM FusionMamba')
+    parser.add_argument('--ir_path', required=True, help='Infrared image directory')
+    parser.add_argument('--vis_path', required=True, help='Visible image directory')
+    parser.add_argument('--train_list', help='Text file containing training filenames')
+    parser.add_argument('--val_list', help='Text file containing validation filenames')
+    parser.add_argument('--output_dir', default='runs/fusion/sacafm')
+    parser.add_argument('--resume', help='Path to a resumable checkpoint')
+    parser.add_argument('--length', type=int, default=0, help='Maximum training pairs; 0 uses all')
+    parser.add_argument('--crop_size', type=int, default=256)
     parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--min_lr', type=float, default=1e-6)
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
+    parser.add_argument('--grad_clip', type=float, default=1.0)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--device', default='0', help='CUDA index or cpu')
+    parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--disable_dsdam', action='store_true', help='Ablate SACAFM alignment')
-    args = parser.parse_args()
-    logpath='./logs'
-    logger = logging.getLogger()
-    setup_logger(logpath)
-    for i in range(1):
-        train_fusion(i, logger, args)
-        print("|{0} Train Fusion Model Sucessfully~!".format(i + 1))
-    print("training Done!")
+    parser.add_argument('--share_encoder_weights', action='store_true')
+    parser.add_argument('--log_interval', type=int, default=10)
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    arguments = parse_args()
+    os.makedirs('logs', exist_ok=True)
+    setup_logger('logs')
+    train_fusion(arguments, logging.getLogger())

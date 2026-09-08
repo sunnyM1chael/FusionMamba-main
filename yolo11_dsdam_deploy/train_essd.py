@@ -53,6 +53,8 @@ def parse_args():
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--device", default="0")
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--patience", type=int, default=40)
+    parser.add_argument("--optimizer", default="AdamW")
     parser.add_argument("--project", default="runs/essd")
     parser.add_argument("--name", default="m3fd")
     parser.add_argument("--seed", type=int, default=42)
@@ -73,6 +75,9 @@ def main():
         project=args.project,
         name=args.name,
         seed=args.seed,
+        deterministic=True,
+        patience=args.patience,
+        optimizer=args.optimizer,
         cos_lr=True,
         close_mosaic=10,
     )

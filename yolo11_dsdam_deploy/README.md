@@ -17,5 +17,9 @@ pip install -e .
 预训练权重无法匹配。使用训练入口完成显式权重重映射：
 
 ```bash
-python train_essd.py --data /path/to/m3fd.yaml --device 0
+python train_essd.py --data ultralytics/cfg/datasets/M3FD-Fused.yaml --device 0
 ```
+
+先修改数据 YAML 中的 `path`。正式实验必须让 YOLO11n 与 ESSD-Head 使用相同
+的 train/val/test 划分、分辨率、增强和随机种子；建议先以 640 分辨率筛选，
+再用 960 分辨率复现最终小目标结果。
