@@ -66,6 +66,9 @@ python train.py --ir_path /path/to/M3FD/Ir --vis_path /path/to/M3FD/Vis \
   --output_dir runs/fusion/sacafm --epochs 100 --batch_size 4 --amp
 ```
 
+For M³FD, use `prepare_m3fd_splits.py` after uploading raw `Ir` and `Vis`; it
+reuses the existing YOLO train/val split instead of randomly repartitioning it.
+
 The fusion model uses a fixed `(infrared, visible)` input order. Training uses
 paired random crops to preserve small-target scale instead of resizing a complete
 frame to a square.
