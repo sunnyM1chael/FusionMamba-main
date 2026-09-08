@@ -73,6 +73,15 @@ frame to a square.
 Training writes `best.pth`, `last.pth`, the exact arguments and JSON loss history.
 Resume an interrupted run with `--resume runs/fusion/sacafm/last.pth`.
 
+KAIST can be used directly without copying its nested sequences:
+
+```
+python prepare_kaist_splits.py --kaist_root /path/to/KAIST --output_dir splits/kaist
+python train.py --kaist_root /path/to/KAIST \
+  --train_list splits/kaist/train.txt --val_list splits/kaist/val.txt \
+  --output_dir runs/fusion/kaist_sacafm --epochs 80 --batch_size 4
+```
+
 Generate fused images for each fixed split and evaluate them without per-image
 min-max normalization:
 

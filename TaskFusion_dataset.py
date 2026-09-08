@@ -43,6 +43,7 @@ class Fusion_dataset(Dataset):
         length=0,
         crop_size=256,
         split_file=None,
+        kaist_root=None,
     ):
         super(Fusion_dataset, self).__init__()
         assert split in ['train', 'val', 'test'], 'split must be "train"|"val"|"test"'
@@ -62,21 +63,51 @@ class Fusion_dataset(Dataset):
             if split_file:
                 with open(split_file, 'r', encoding='utf-8') as handle:
                     selected = {
-                        os.path.basename(line.strip())
+                        line.strip().replace('\\', '/')
                         for line in handle
                         if line.strip() and not line.lstrip().startswith('#')
                     }
-                missing = sorted(selected - set(matched))
+                selected_names = {os.path.basename(name) for name in selected}
+                missing = sorted(selected - set(matched) - selected_names)
                 if missing:
                     sample = ', '.join(missing[:5])
                     raise ValueError(f"{len(missing)} split entries have no IR/VIS pair, e.g. {sample}")
-                matched = [name for name in matched if name in selected]
+                matched = [name for name in matched if name in selected or name in selected_names]
             if not matched:
                 raise ValueError(f"No filename-matched IR/VIS pairs in {ir_path} and {vi_path}")
             self.filepath_ir = [ir_by_name[name] for name in matched]
             self.filepath_vis = [vi_by_name[name] for name in matched]
             self.filenames_ir = matched
             self.filenames_vis = matched
+        elif kaist_root and split in ('train', 'val'):
+            root = os.path.abspath(kaist_root)
+            for lwir_path in glob.glob(os.path.join(root, '**', 'lwir', '*'), recursive=True):
+                if not os.path.isfile(lwir_path) or os.path.splitext(lwir_path)[1].lower() not in {'.jpg', '.jpeg', '.png', '.bmp'}:
+                    continue
+                vis_path = os.path.join(os.path.dirname(os.path.dirname(lwir_path)), 'visible', os.path.basename(lwir_path))
+                if not os.path.isfile(vis_path):
+                    continue
+                key = os.path.relpath(lwir_path, root).replace('\\', '/')
+                self.filepath_ir.append(lwir_path)
+                self.filepath_vis.append(vis_path)
+                self.filenames_ir.append(key)
+                self.filenames_vis.append(key)
+            if not self.filepath_ir:
+                raise ValueError(f'No KAIST lwir/visible pairs found under {kaist_root}')
+            if split_file:
+                with open(split_file, 'r', encoding='utf-8') as handle:
+                    selected = {
+                        line.strip().replace('\\', '/')
+                        for line in handle
+                        if line.strip() and not line.lstrip().startswith('#')
+                    }
+                keep = [name in selected for name in self.filenames_ir]
+                self.filepath_ir = [path for path, flag in zip(self.filepath_ir, keep) if flag]
+                self.filepath_vis = [path for path, flag in zip(self.filepath_vis, keep) if flag]
+                self.filenames_ir = [name for name, flag in zip(self.filenames_ir, keep) if flag]
+                self.filenames_vis = [name for name, flag in zip(self.filenames_vis, keep) if flag]
+                if not self.filepath_ir:
+                    raise ValueError(f'No KAIST pairs selected by {split_file}')
         elif split == 'train':
             # Backward-compatible KAIST layout. Explicit paths are recommended.
             if not ir_path and not vi_path:

@@ -143,6 +143,8 @@ def plot_history(history, output_path):
 
 
 def train_fusion(args, logger):
+    if not args.kaist_root and (not args.ir_path or not args.vis_path):
+        raise ValueError('Provide --ir_path/--vis_path or --kaist_root')
     from models.vmamba_Fusion_efficross import VSSM_Fusion
 
     set_seed(args.seed)
@@ -171,7 +173,7 @@ def train_fusion(args, logger):
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
     train_set = Fusion_dataset(
-        'train', args.ir_path, args.vis_path, args.length, args.crop_size, args.train_list
+        'train', args.ir_path, args.vis_path, args.length, args.crop_size, args.train_list, args.kaist_root
     )
     train_loader = build_loader(
         train_set, args.batch_size, args.num_workers, True, args.seed
@@ -180,7 +182,7 @@ def train_fusion(args, logger):
     val_loader = None
     if args.val_list:
         val_set = Fusion_dataset(
-            'val', args.ir_path, args.vis_path, 0, args.crop_size, args.val_list
+            'val', args.ir_path, args.vis_path, 0, args.crop_size, args.val_list, args.kaist_root
         )
         val_loader = build_loader(val_set, 1, args.num_workers, False, args.seed)
 
@@ -275,8 +277,9 @@ def train_fusion(args, logger):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train SACAFM FusionMamba')
-    parser.add_argument('--ir_path', required=True, help='Infrared image directory')
-    parser.add_argument('--vis_path', required=True, help='Visible image directory')
+    parser.add_argument('--ir_path', help='Infrared image directory')
+    parser.add_argument('--vis_path', help='Visible image directory')
+    parser.add_argument('--kaist_root', help='KAIST root containing nested lwir/visible sequences')
     parser.add_argument('--train_list', help='Text file containing training filenames')
     parser.add_argument('--val_list', help='Text file containing validation filenames')
     parser.add_argument('--output_dir', default='runs/fusion/sacafm')
