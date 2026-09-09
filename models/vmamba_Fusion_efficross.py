@@ -755,7 +755,8 @@ class SACAFM(nn.Module):
     """Shape-Adaptive Cross-modal Alignment and Fusion Module."""
 
     def __init__(self, hidden_dim, use_alignment=True, drop_path=0.0,
-                 norm_layer=nn.LayerNorm, attn_drop_rate=0.0, d_state=16):
+                 norm_layer=nn.LayerNorm, attn_drop_rate=0.0, d_state=16,
+                 weighting_mode='acgaw'):
         super().__init__()
         self.aligner = CrossModalDSDAM(hidden_dim) if use_alignment else None
         self.fusion = VSSBlock_Cross_new(
@@ -764,6 +765,7 @@ class SACAFM(nn.Module):
             norm_layer=norm_layer,
             attn_drop_rate=attn_drop_rate,
             d_state=d_state,
+            weighting_mode=weighting_mode,
         )
 
     def forward(self, infrared, visible):
@@ -782,7 +784,8 @@ class VSSM_Fusion(nn.Module):
                  dims=[96, 192, 384, 768], dims_decoder=[768, 384, 192, 96], d_state=16, drop_rate=0.,
                  attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True,
-                 use_checkpoint=False, use_dsdam=False, share_encoder_weights=False, **kwargs):
+                 use_checkpoint=False, use_dsdam=False, share_encoder_weights=False,
+                 weighting_mode='acgaw', **kwargs):
         # 【改动点3】移除 dsdam_positions 参数, 新增 share_encoder_weights 开关
         #   之前: use_dsdam + dsdam_positions(['pre'/'post']) 控制 DSDAM 位置
         #   现在: 仅保留 use_dsdam 开关, DSDAM 统一放在每层 DFFM 输入前(论文规则3)
@@ -876,6 +879,7 @@ class VSSM_Fusion(nn.Module):
 
         # SACAFM unifies joint DSDAM alignment, ACGAW and DFFM at every scale.
         self.use_dsdam = use_dsdam
+        self.weighting_mode = weighting_mode
         self.sacafm_layers = nn.ModuleList([
             SACAFM(
                 hidden_dim=dims[i_layer],
@@ -884,6 +888,7 @@ class VSSM_Fusion(nn.Module):
                 norm_layer=norm_layer,
                 attn_drop_rate=attn_drop_rate,
                 d_state=d_state,
+                weighting_mode=weighting_mode,
             )
             for i_layer in range(self.num_layers)
         ])
@@ -1060,7 +1065,6 @@ class VSSM_Fusion(nn.Module):
 #     x2 = torch.rand((4, 1, 256, 256)).cuda()
 #     a = net(x1, x2).cuda()
 #     print(a.shape)
-
 
 
 

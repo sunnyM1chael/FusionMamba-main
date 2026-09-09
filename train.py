@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from logger import setup_logger
 from loss import Fusionloss
 from TaskFusion_dataset import Fusion_dataset
+from split_manifest import read_manifest, manifest_sha256
 
 
 def set_seed(seed):
@@ -50,14 +51,14 @@ def build_loader(dataset, batch_size, workers, shuffle, seed):
     )
 
 
-def compute_loss(model, criterion, image_vis, image_ir, device, amp):
+def compute_loss(model, criterion, image_vis, image_ir, device, amp, amp_dtype=torch.float16):
     image_vis = image_vis.to(device, non_blocking=True)
     image_ir = image_ir.to(device, non_blocking=True)
     height, width = image_ir.shape[-2:]
     pad_h, pad_w = (-height) % 32, (-width) % 32
     model_vis = F.pad(image_vis, (0, pad_w, 0, pad_h), mode='replicate') if pad_h or pad_w else image_vis
     model_ir = F.pad(image_ir, (0, pad_w, 0, pad_h), mode='replicate') if pad_h or pad_w else image_ir
-    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp):
+    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp):
         fusion_image = model(model_ir, model_vis)[..., :height, :width]
         total, intensity, ssim, gradient = criterion(
             image_vis=image_vis,
@@ -70,11 +71,11 @@ def compute_loss(model, criterion, image_vis, image_ir, device, amp):
 
 
 @torch.no_grad()
-def validate(model, loader, criterion, device, amp):
+def validate(model, loader, criterion, device, amp, amp_dtype=torch.float16):
     model.eval()
     totals = np.zeros(4, dtype=np.float64)
     for image_vis, image_ir in loader:
-        losses = compute_loss(model, criterion, image_vis, image_ir, device, amp)
+        losses = compute_loss(model, criterion, image_vis, image_ir, device, amp, amp_dtype)
         totals += np.asarray([loss.item() for loss in losses])
     return totals / max(len(loader), 1)
 
@@ -149,15 +150,24 @@ def plot_history(history, output_path):
 
 
 def train_fusion(args, logger):
+    if args.device != 'cpu' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA is unavailable. Restore a GPU instance or explicitly request --device cpu.')
     if not args.kaist_root and (not args.ir_path or not args.vis_path):
         raise ValueError('Provide --ir_path/--vis_path or --kaist_root')
     if args.resume and args.pretrained:
         raise ValueError('Use only one of --resume and --pretrained')
+    if args.train_list and args.val_list:
+        overlap = set(read_manifest(args.train_list)) & set(read_manifest(args.val_list))
+        if overlap:
+            raise ValueError(f'Train/validation overlap: {sorted(overlap)[:5]}')
     from models.vmamba_Fusion_efficross import VSSM_Fusion
 
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    provenance = {name: {'path': str(Path(path).resolve()), 'sha256': manifest_sha256(path)}
+                  for name, path in [('train', args.train_list), ('val', args.val_list)] if path}
+    (output_dir / 'split_provenance.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
     with (output_dir / 'train_args.json').open('w', encoding='utf-8') as handle:
         json.dump(vars(args), handle, ensure_ascii=False, indent=2)
 
@@ -166,10 +176,12 @@ def train_fusion(args, logger):
     else:
         device = torch.device('cpu')
     amp = args.amp and device.type == 'cuda'
+    amp_dtype = torch.bfloat16 if args.amp_dtype == 'bfloat16' else torch.float16
 
     model = VSSM_Fusion(
         use_dsdam=not args.disable_dsdam,
         share_encoder_weights=args.share_encoder_weights,
+        weighting_mode=args.weighting_mode,
     ).to(device)
     criterion = Fusionloss().to(device)
     optimizer = torch.optim.AdamW(
@@ -178,7 +190,11 @@ def train_fusion(args, logger):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(args.epochs, 1), eta_min=args.min_lr
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    scaler_enabled = amp and amp_dtype == torch.float16
+    try:
+        scaler = torch.amp.GradScaler('cuda', enabled=scaler_enabled)
+    except AttributeError:
+        scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
 
     if args.pretrained:
         load_pretrained(args.pretrained, model, device)
@@ -218,15 +234,24 @@ def train_fusion(args, logger):
         model.train()
         sums = np.zeros(4, dtype=np.float64)
         started = time.time()
+        optimizer_updates = 0
+        skipped_updates = 0
         for step, (image_vis, image_ir) in enumerate(train_loader, start=1):
             optimizer.zero_grad(set_to_none=True)
-            losses = compute_loss(model, criterion, image_vis, image_ir, device, amp)
+            losses = compute_loss(model, criterion, image_vis, image_ir, device, amp, amp_dtype)
+            if not torch.isfinite(losses[0]):
+                raise FloatingPointError(f'Non-finite loss at epoch {epoch + 1}, step {step}')
             scaler.scale(losses[0]).backward()
             if args.grad_clip > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            if scaler.is_enabled() and scaler.get_scale() < scale_before:
+                skipped_updates += 1
+            else:
+                optimizer_updates += 1
             sums += np.asarray([loss.item() for loss in losses])
             if step % args.log_interval == 0:
                 logger.info(
@@ -241,13 +266,15 @@ def train_fusion(args, logger):
 
         train_values = sums / max(len(train_loader), 1)
         val_values = (
-            validate(model, val_loader, criterion, device, amp)
+            validate(model, val_loader, criterion, device, amp, amp_dtype)
             if val_loader is not None
             else None
         )
         record = {
             'epoch': epoch + 1,
             'lr': optimizer.param_groups[0]['lr'],
+            'optimizer_updates': optimizer_updates,
+            'skipped_updates': skipped_updates,
             'train_total': float(train_values[0]),
             'train_intensity': float(train_values[1]),
             'train_ssim': float(train_values[2]),
@@ -262,6 +289,8 @@ def train_fusion(args, logger):
         improved = monitored < best_val
         if improved:
             best_val = monitored
+        if optimizer_updates == 0:
+            raise FloatingPointError(f'All optimizer updates were skipped in epoch {epoch + 1}')
         scheduler.step()
         save_checkpoint(
             output_dir / 'last.pth', model, optimizer, scheduler, scaler,
@@ -308,8 +337,13 @@ def parse_args():
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', default='0', help='CUDA index or cpu')
-    parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=False,
+                        help='Opt-in mixed precision; FP32 is the reproducible default')
+    parser.add_argument('--amp_dtype', choices=('bfloat16', 'float16'), default='float16',
+                        help='Only applies with --amp; validate numerical stability first')
     parser.add_argument('--disable_dsdam', action='store_true', help='Ablate SACAFM alignment')
+    parser.add_argument('--weighting_mode', choices=('equal', 'learned', 'acgaw'), default='acgaw',
+                        help='Modality weighting ablation: fixed, unguided learned, or confidence-guided')
     parser.add_argument('--share_encoder_weights', action='store_true')
     parser.add_argument('--log_interval', type=int, default=10)
     return parser.parse_args()

@@ -7,6 +7,7 @@ from PIL import Image
 import cv2
 import glob
 from numpy import asarray
+from split_manifest import read_manifest, paired_paths
 
 def imresize(arr, size, interp='bilinear', mode=None):
     numpydata = asarray(arr)
@@ -61,18 +62,12 @@ class Fusion_dataset(Dataset):
             vi_by_name = {os.path.basename(path): path for path in vi_files}
             matched = sorted(set(ir_by_name) & set(vi_by_name))
             if split_file:
-                with open(split_file, 'r', encoding='utf-8') as handle:
-                    selected = {
-                        line.strip().replace('\\', '/')
-                        for line in handle
-                        if line.strip() and not line.lstrip().startswith('#')
-                    }
-                selected_names = {os.path.basename(name) for name in selected}
-                missing = sorted(selected - set(matched) - selected_names)
-                if missing:
-                    sample = ', '.join(missing[:5])
-                    raise ValueError(f"{len(missing)} split entries have no IR/VIS pair, e.g. {sample}")
-                matched = [name for name in matched if name in selected or name in selected_names]
+                matched = read_manifest(split_file)
+                pairs = paired_paths(ir_path, vi_path, matched)
+                ir_by_name = {name: str(pair[0]) for name, pair in zip(matched, pairs)}
+                vi_by_name = {name: str(pair[1]) for name, pair in zip(matched, pairs)}
+            elif set(ir_by_name) != set(vi_by_name):
+                raise ValueError('IR/VIS sample sets differ; supply a complete paired dataset')
             if not matched:
                 raise ValueError(f"No filename-matched IR/VIS pairs in {ir_path} and {vi_path}")
             self.filepath_ir = [ir_by_name[name] for name in matched]
@@ -95,12 +90,10 @@ class Fusion_dataset(Dataset):
             if not self.filepath_ir:
                 raise ValueError(f'No KAIST lwir/visible pairs found under {kaist_root}')
             if split_file:
-                with open(split_file, 'r', encoding='utf-8') as handle:
-                    selected = {
-                        line.strip().replace('\\', '/')
-                        for line in handle
-                        if line.strip() and not line.lstrip().startswith('#')
-                    }
+                selected = set(read_manifest(split_file))
+                missing = selected - set(self.filenames_ir)
+                if missing:
+                    raise ValueError(f'KAIST manifest entries lack pairs: {sorted(missing)[:5]}')
                 keep = [name in selected for name in self.filenames_ir]
                 self.filepath_ir = [path for path, flag in zip(self.filepath_ir, keep) if flag]
                 self.filepath_vis = [path for path, flag in zip(self.filepath_vis, keep) if flag]

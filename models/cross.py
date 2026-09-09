@@ -1267,8 +1267,11 @@ class AlignmentConfidenceGuidedAdaptiveWeighting(nn.Module):
     a lightweight energy prior for small thermal targets.
     """
 
-    def __init__(self, channels, reduction=4):
+    def __init__(self, channels, reduction=4, mode='acgaw'):
         super().__init__()
+        if mode not in {'equal', 'learned', 'acgaw'}:
+            raise ValueError(f'Unknown modality weighting mode: {mode}')
+        self.mode = mode
         hidden = max(channels // reduction, 16)
         joint_channels = channels * 4
         self.local_projection = nn.Sequential(
@@ -1300,6 +1303,9 @@ class AlignmentConfidenceGuidedAdaptiveWeighting(nn.Module):
 
     def forward(self, infrared, visible, alignment_confidence=None):
         batch, channels, height, width = infrared.shape
+        if self.mode == 'equal':
+            weights = infrared.new_full((batch, 2, channels, height, width), 0.5)
+            return 0.5 * (infrared + visible), weights
         difference = torch.abs(infrared - visible)
         joint = torch.cat([infrared, visible, difference, infrared * visible], dim=1)
 
@@ -1309,11 +1315,14 @@ class AlignmentConfidenceGuidedAdaptiveWeighting(nn.Module):
             [self._local_contrast(infrared), self._local_contrast(visible)], dim=1
         )
 
-        if alignment_confidence is None:
-            alignment_confidence = torch.exp(-torch.mean(difference, dim=1, keepdim=True))
-        confidence = alignment_confidence.clamp(0.0, 1.0).unsqueeze(1)
         temperature = self.temperature.abs().clamp_min(0.05)
-        logits = ((spatial + channel) * confidence + self.saliency_gain * saliency) / temperature
+        if self.mode == 'learned':
+            logits = (spatial + channel) / temperature
+        else:
+            if alignment_confidence is None:
+                alignment_confidence = torch.exp(-torch.mean(difference, dim=1, keepdim=True))
+            confidence = alignment_confidence.clamp(0.0, 1.0).unsqueeze(1)
+            logits = ((spatial + channel) * confidence + self.saliency_gain * saliency) / temperature
         weights = torch.softmax(logits, dim=1)
         fused = weights[:, 0] * infrared + weights[:, 1] * visible
         return fused, weights
@@ -1327,6 +1336,7 @@ class VSSBlock_Cross_new(nn.Module):
             norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
             attn_drop_rate: float = 0,
             d_state: int = 16,
+            weighting_mode: str = 'acgaw',
             **kwargs,
     ):
         super().__init__()
@@ -1335,7 +1345,7 @@ class VSSBlock_Cross_new(nn.Module):
         self.Cross_layer = Cross_layer(hidden_dim)
         self.self_attention_cross = SS2D_cross_new(d_model=hidden_dim, dropout=attn_drop_rate, d_state=d_state, **kwargs)
         self.self_attention_cross_spatial = eca_layer(channel=hidden_dim)
-        self.adaptive_weight = AlignmentConfidenceGuidedAdaptiveWeighting(hidden_dim)
+        self.adaptive_weight = AlignmentConfidenceGuidedAdaptiveWeighting(hidden_dim, mode=weighting_mode)
         self.drop_path = DropPath(drop_path)
 
     def forward(self, input1: torch.Tensor, input2:torch.Tensor, alignment_confidence=None):

@@ -7,13 +7,31 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from split_manifest import read_manifest, paired_paths, manifest_sha256
 
 
 EXTENSIONS = {'.bmp', '.tif', '.tiff', '.jpg', '.jpeg', '.png'}
 
 
 def scan(folder):
-    return {p.name: p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS}
+    return {p.relative_to(folder).as_posix(): p for p in Path(folder).rglob('*')
+            if p.is_file() and p.suffix.lower() in EXTENSIONS}
+
+
+def evaluation_samples(ir_path, vis_path, fused_path, split_file=None):
+    fused = scan(fused_path)
+    if split_file:
+        names = read_manifest(split_file)
+        pairs = paired_paths(ir_path, vis_path, names)
+        if set(fused) != set(names):
+            raise ValueError(f'Fused output does not match manifest: '
+                             f'missing={sorted(set(names)-set(fused))[:5]}, '
+                             f'extra={sorted(set(fused)-set(names))[:5]}')
+        return [(name, pair[0], pair[1], fused[name]) for name, pair in zip(names, pairs)]
+    ir, vis = scan(ir_path), scan(vis_path)
+    if not ir or set(ir) != set(vis) or set(ir) != set(fused):
+        raise ValueError('IR/VIS/fused sample sets must match exactly; use --split_file for subsets')
+    return [(name, ir[name], vis[name], fused[name]) for name in sorted(ir)]
 
 
 def entropy(image):
@@ -73,16 +91,14 @@ def main():
     parser.add_argument('--ir_path', required=True)
     parser.add_argument('--vis_path', required=True)
     parser.add_argument('--fused_path', required=True)
+    parser.add_argument('--split_file', help='Frozen manifest; missing or extra fused images are errors')
     parser.add_argument('--output', default='fusion_metrics.json')
     args = parser.parse_args()
 
-    ir_files, vis_files, fused_files = scan(args.ir_path), scan(args.vis_path), scan(args.fused_path)
-    names = sorted(set(ir_files) & set(vis_files) & set(fused_files))
-    if not names:
-        raise ValueError('No filename-matched IR/VIS/fused triplets found')
+    samples = evaluation_samples(args.ir_path, args.vis_path, args.fused_path, args.split_file)
     rows = []
-    for name in names:
-        images = [cv2.imread(str(files[name]), cv2.IMREAD_GRAYSCALE) for files in (ir_files, vis_files, fused_files)]
+    for name, ir, vis, fused in samples:
+        images = [cv2.imread(str(path), cv2.IMREAD_GRAYSCALE) for path in (ir, vis, fused)]
         if any(image is None for image in images):
             raise ValueError(f'Failed to load {name}')
         if len({image.shape for image in images}) != 1:
@@ -99,7 +115,9 @@ def main():
     }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({'count': len(rows), 'summary': summary}, indent=2), encoding='utf-8')
+    output.write_text(json.dumps({'count': len(rows), 'summary': summary,
+                                 'manifest_sha256': manifest_sha256(args.split_file) if args.split_file else None,
+                                 'protocol': 'strict-v1; OpenCV grayscale; 8-bit; source-mean SSIM'}, indent=2), encoding='utf-8')
     with output.with_suffix('.csv').open('w', newline='', encoding='utf-8') as handle:
         writer = csv.DictWriter(handle, fieldnames=('name', *keys))
         writer.writeheader()

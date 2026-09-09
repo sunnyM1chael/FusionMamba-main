@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from split_manifest import read_manifest, paired_paths
 
 
 EXTENSIONS = {'.bmp', '.tif', '.tiff', '.jpg', '.jpeg', '.png'}
@@ -23,7 +24,9 @@ def load_model(checkpoint_path, device, disable_dsdam, share_encoder_weights):
     saved_args = checkpoint.get('args', {}) if isinstance(checkpoint, dict) else {}
     use_dsdam = not saved_args.get('disable_dsdam', disable_dsdam)
     shared = saved_args.get('share_encoder_weights', share_encoder_weights)
-    model = VSSM_Fusion(use_dsdam=use_dsdam, share_encoder_weights=shared).to(device)
+    weighting_mode = saved_args.get('weighting_mode', 'acgaw')
+    model = VSSM_Fusion(use_dsdam=use_dsdam, share_encoder_weights=shared,
+                        weighting_mode=weighting_mode).to(device)
     state = checkpoint.get('model', checkpoint) if isinstance(checkpoint, dict) else checkpoint
     model.load_state_dict(state)
     model.eval()
@@ -71,15 +74,12 @@ def selected_names(ir_path, vis_path, split_file):
     ir_files, vis_files = scan(ir_path), scan(vis_path)
     names = sorted(set(ir_files) & set(vis_files))
     if split_file:
-        requested = {
-            Path(line.strip()).name
-            for line in Path(split_file).read_text(encoding='utf-8').splitlines()
-            if line.strip() and not line.lstrip().startswith('#')
-        }
-        missing = requested - set(names)
-        if missing:
-            raise ValueError(f'{len(missing)} requested pairs are missing')
-        names = [name for name in names if name in requested]
+        names = read_manifest(split_file)
+        pairs = paired_paths(ir_path, vis_path, names)
+        ir_files = {name: pair[0] for name, pair in zip(names, pairs)}
+        vis_files = {name: pair[1] for name, pair in zip(names, pairs)}
+    elif not names or set(ir_files) != set(vis_files):
+        raise ValueError('IR/VIS samples must match exactly')
     return ir_files, vis_files, names
 
 
@@ -95,12 +95,18 @@ def main():
     parser.add_argument('--overlap', type=int, default=32)
     parser.add_argument('--max_pairs', type=int, default=0)
     parser.add_argument('--grayscale', action='store_true')
+    parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=False,
+                        help='Use FP16 inference on CUDA; FP32 is the validated default')
     parser.add_argument('--disable_dsdam', action='store_true')
     parser.add_argument('--share_encoder_weights', action='store_true')
     args = parser.parse_args()
 
+    if args.device != 'cpu' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA is unavailable; restore GPU or explicitly request --device cpu')
     device = torch.device(f'cuda:{args.device}' if torch.cuda.is_available() and args.device != 'cpu' else 'cpu')
-    amp = device.type == 'cuda'
+    if args.amp and device.type != 'cuda':
+        raise ValueError('--amp requires a CUDA device')
+    amp = args.amp
     model = load_model(
         args.checkpoint, device, args.disable_dsdam, args.share_encoder_weights
     )
@@ -122,6 +128,8 @@ def main():
             model, ir.astype(np.float32) / 255.0, visible.astype(np.float32) / 255.0,
             device, amp, args.tile, args.overlap
         )
+        if not np.isfinite(fused).all():
+            raise FloatingPointError(f'Non-finite fused output for {name}')
         fused_y = (fused * 255.0).round().clip(0, 255).astype(np.uint8)
         if args.grayscale:
             result = fused_y
@@ -129,7 +137,10 @@ def main():
             ycrcb = cv2.cvtColor(visible_color, cv2.COLOR_BGR2YCrCb)
             ycrcb[:, :, 0] = fused_y
             result = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
-        cv2.imwrite(str(output_dir / name), result)
+        destination = output_dir / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(destination), result):
+            raise OSError(f'Could not save {destination}')
         if index % 50 == 0 or index == len(names):
             print(f'{index}/{len(names)}')
 
