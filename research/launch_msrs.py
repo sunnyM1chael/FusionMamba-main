@@ -11,6 +11,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--commit', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--resume', type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     protocol = Path('/root/autodl-fs/research_protocol/v1/development_splits/msrs')
@@ -22,7 +23,11 @@ def main():
     for split, digest in expected.items():
         if hashlib.sha256((protocol / f'{split}.txt').read_bytes()).hexdigest() != digest:
             raise ValueError(f'Frozen {split} manifest changed')
-    args.output.mkdir(parents=True, exist_ok=False)
+    if args.resume:
+        if not args.output.is_dir() or args.resume.parent != args.output:
+            raise ValueError('Resume checkpoint must be inside the existing output directory')
+    else:
+        args.output.mkdir(parents=True, exist_ok=False)
     command = [sys.executable, '-u', str(root / 'train.py'),
                '--ir_path', '/root/autodl-fs/datasets/MSRS/train/ir',
                '--vis_path', '/root/autodl-fs/datasets/MSRS/train/vi',
@@ -33,6 +38,8 @@ def main():
                '--lr', '0.0001', '--min_lr', '0.000001', '--weight_decay', '0.0001',
                '--grad_clip', '1.0', '--seed', '42', '--device', '0', '--no-amp',
                '--weighting_mode', 'acgaw', '--log_interval', '10']
+    if args.resume:
+        command.extend(['--resume', str(args.resume)])
     sources = {}
     for folder in (root, root / 'models'):
         for path in folder.glob('*.py'):
@@ -41,10 +48,14 @@ def main():
               'command': command, 'role': 'first full MSRS development run; no test evaluation',
               'selection': 'minimum full-resolution validation fusion loss',
               'python': sys.version}
-    (args.output / 'run_provenance.json').write_text(json.dumps(record, indent=2))
-    with (args.output / 'environment.txt').open('w') as handle:
-        subprocess.run([sys.executable, '-m', 'pip', 'freeze'], stdout=handle, check=True)
-    with (args.output / 'train.log').open('w') as handle:
+    if args.resume:
+        with (args.output / 'resume_events.jsonl').open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(record) + '\n')
+    else:
+        (args.output / 'run_provenance.json').write_text(json.dumps(record, indent=2))
+        with (args.output / 'environment.txt').open('w') as handle:
+            subprocess.run([sys.executable, '-m', 'pip', 'freeze'], stdout=handle, check=True)
+    with (args.output / 'train.log').open('a' if args.resume else 'w') as handle:
         child = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL,
                                  stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
     (args.output / 'pid.txt').write_text(str(child.pid))

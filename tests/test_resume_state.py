@@ -3,6 +3,7 @@ from argparse import Namespace
 import random
 
 import numpy as np
+import pytest
 import torch
 
 from train import build_loader, load_checkpoint, save_checkpoint, set_seed
@@ -38,3 +39,20 @@ def test_checkpoint_continues_next_update(tmp_path):
     for key in expected_params:
         torch.testing.assert_close(actual_params[key], expected_params[key], rtol=0, atol=0)
     assert actual_lr == expected_lr
+
+
+def test_weights_checkpoint_is_valid_but_not_resumable(tmp_path):
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=2)
+    scaler = torch.amp.GradScaler('cuda', enabled=False)
+    path = tmp_path / 'best.pth'
+    save_checkpoint(
+        path, model, optimizer, scheduler, scaler, 0, 1.0, [], Namespace(),
+        resumable=False,
+    )
+    checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+    assert checkpoint['checkpoint_type'] == 'weights'
+    assert checkpoint['optimizer'] is None and checkpoint['rng'] is None
+    with pytest.raises(ValueError, match='weights-only'):
+        load_checkpoint(path, model, optimizer, scheduler, scaler, 'cpu')

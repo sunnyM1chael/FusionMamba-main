@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import time
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -80,27 +81,43 @@ def validate(model, loader, criterion, device, amp, amp_dtype=torch.float16):
     return totals / max(len(loader), 1)
 
 
-def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best_val, history, args, loaders=()):
-    torch.save(
-        {
+def save_checkpoint(
+    path, model, optimizer, scheduler, scaler, epoch, best_val, history, args,
+    loaders=(), resumable=True,
+):
+    path = Path(path)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    payload = {
             'epoch': epoch,
             'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'scheduler': scheduler.state_dict(),
-            'scaler': scaler.state_dict(),
+            'optimizer': optimizer.state_dict() if resumable else None,
+            'scheduler': scheduler.state_dict() if resumable else None,
+            'scaler': scaler.state_dict() if resumable else None,
             'best_val': best_val,
             'history': history,
             'args': vars(args),
+            'checkpoint_type': 'resume' if resumable else 'weights',
             'rng': {
                 'python': random.getstate(),
                 'numpy': np.random.get_state(),
                 'torch': torch.get_rng_state(),
                 'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
                 'loaders': [loader.generator.get_state() for loader in loaders],
-            },
-        },
-        path,
-    )
+            } if resumable else None,
+        }
+    try:
+        torch.save(payload, temporary)
+        # Opening the central directory is inexpensive and detects truncated
+        # PyTorch zip archives before they can replace a valid checkpoint.
+        with zipfile.ZipFile(temporary, 'r') as archive:
+            if not archive.namelist():
+                raise OSError(f'Empty checkpoint archive: {temporary}')
+        with temporary.open('r+b') as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def load_checkpoint(path, model, optimizer, scheduler, scaler, device, loaders=()):
@@ -109,11 +126,13 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler, device, loaders=(
         model.load_state_dict(checkpoint)
         return 0, float('inf'), []
     model.load_state_dict(checkpoint['model'])
+    if not checkpoint.get('optimizer') or not checkpoint.get('scheduler'):
+        raise ValueError('Checkpoint is weights-only; use --pretrained instead of --resume')
     optimizer.load_state_dict(checkpoint['optimizer'])
     scheduler.load_state_dict(checkpoint['scheduler'])
     if checkpoint.get('scaler'):
         scaler.load_state_dict(checkpoint['scaler'])
-    if 'rng' in checkpoint:
+    if checkpoint.get('rng'):
         rng = checkpoint['rng']
         random.setstate(rng['python'])
         np.random.set_state(rng['numpy'])
@@ -324,7 +343,8 @@ def train_fusion(args, logger):
             save_checkpoint(
                 output_dir / 'best.pth', model, optimizer, scheduler, scaler,
                 epoch, best_val, history, args,
-                [loader for loader in (train_loader, val_loader) if loader is not None]
+                [loader for loader in (train_loader, val_loader) if loader is not None],
+                resumable=False,
             )
         with (output_dir / 'history.json').open('w', encoding='utf-8') as handle:
             json.dump(history, handle, ensure_ascii=False, indent=2)
