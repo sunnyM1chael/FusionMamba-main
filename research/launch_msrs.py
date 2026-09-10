@@ -12,6 +12,8 @@ def main():
     parser.add_argument('--commit', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--resume', type=Path)
+    parser.add_argument('--weighting_mode', choices=('equal', 'learned', 'acgaw'), default='acgaw')
+    parser.add_argument('--wait', action='store_true', help='Wait for completion and propagate failure for a serial queue')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     protocol = Path('/root/autodl-fs/research_protocol/v1/development_splits/msrs')
@@ -37,7 +39,7 @@ def main():
                '--batch_size', '4', '--num_workers', '4', '--epochs', '100',
                '--lr', '0.0001', '--min_lr', '0.000001', '--weight_decay', '0.0001',
                '--grad_clip', '1.0', '--seed', '42', '--device', '0', '--no-amp',
-               '--weighting_mode', 'acgaw', '--log_interval', '10']
+               '--weighting_mode', args.weighting_mode, '--log_interval', '10']
     if args.resume:
         command.extend(['--resume', str(args.resume)])
     sources = {}
@@ -60,6 +62,13 @@ def main():
                                  stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
     (args.output / 'pid.txt').write_text(str(child.pid))
     print(json.dumps({'pid': child.pid, 'output': str(args.output)}))
+    if args.wait:
+        code = child.wait()
+        if code:
+            raise SystemExit(code)
+        history = json.loads((args.output / 'history.json').read_text())
+        if len(history) != 100 or history[-1]['epoch'] != 100:
+            raise RuntimeError('Training exited without completing the frozen 100 epochs')
 
 
 if __name__ == '__main__':
