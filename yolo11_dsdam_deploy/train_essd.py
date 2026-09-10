@@ -10,7 +10,7 @@ from ultralytics.data.utils import check_det_dataset
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils import LOGGER
-from ultralytics.utils.torch_utils import strip_optimizer
+from ultralytics.utils.torch_utils import strip_optimizer, init_seeds
 
 
 ESSD_MAP = {
@@ -154,6 +154,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # New modules are initialized before the trainer exists.
+    init_seeds(args.seed, deterministic=False)
     if args.variant == "baseline":
         if args.model:
             raise ValueError("--model is not used with the baseline variant")

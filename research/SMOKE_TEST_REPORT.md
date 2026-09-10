@@ -1,5 +1,21 @@
 # Protocol v1 smoke-test report
 
+## 2026-09-10 preflight corrections
+
+The detector attention output previously restored NCHW from the wrong permutation,
+mixing channel and pixel positions. The correction preserves `(head, head_channel,
+pixel)` order. Analytical forward tests cover global, single-pixel and 2x2-window
+attention. September 9 detector results remain execution checks only and must not
+be reused for model comparisons. Detector initialization is now seeded before
+constructing new modules.
+
+Fusion checkpoints now retain Python, NumPy, CPU/CUDA and loader-generator RNG
+states. An exact next-update regression test verifies restored parameters, data
+order and learning rate. Legacy checkpoints cannot reproduce the random sequence.
+All 14 server tests passed. The crop256/batch4 FP32 Fusion pilot completed with
+train loss 6.16423 and full-resolution validation loss 5.31979 (16/4 pairs, 60.5 s).
+These timings include validation and saving and are not per-training-batch timings.
+
 Date: 2026-09-09. Hardware: one NVIDIA RTX 4090 D. Smoke tests establish that
 the controlled experiment paths execute correctly; their tiny-sample metrics must
 not be reported as model performance.

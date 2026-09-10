@@ -80,7 +80,7 @@ def validate(model, loader, criterion, device, amp, amp_dtype=torch.float16):
     return totals / max(len(loader), 1)
 
 
-def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best_val, history, args):
+def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best_val, history, args, loaders=()):
     torch.save(
         {
             'epoch': epoch,
@@ -91,13 +91,20 @@ def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best_val, 
             'best_val': best_val,
             'history': history,
             'args': vars(args),
+            'rng': {
+                'python': random.getstate(),
+                'numpy': np.random.get_state(),
+                'torch': torch.get_rng_state(),
+                'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                'loaders': [loader.generator.get_state() for loader in loaders],
+            },
         },
         path,
     )
 
 
-def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
-    checkpoint = torch.load(path, map_location=device)
+def load_checkpoint(path, model, optimizer, scheduler, scaler, device, loaders=()):
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
     if 'model' not in checkpoint:
         model.load_state_dict(checkpoint)
         return 0, float('inf'), []
@@ -106,6 +113,19 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
     scheduler.load_state_dict(checkpoint['scheduler'])
     if checkpoint.get('scaler'):
         scaler.load_state_dict(checkpoint['scaler'])
+    if 'rng' in checkpoint:
+        rng = checkpoint['rng']
+        random.setstate(rng['python'])
+        np.random.set_state(rng['numpy'])
+        torch.set_rng_state(rng['torch'].cpu())
+        if rng['cuda'] and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([state.cpu() for state in rng['cuda']])
+        if len(loaders) != len(rng['loaders']):
+            raise ValueError('Checkpoint data-loader count differs from this run')
+        for loader, state in zip(loaders, rng['loaders']):
+            loader.generator.set_state(state.cpu())
+    else:
+        logging.warning('Legacy checkpoint has no RNG state; continuation is not sequence-equivalent.')
     return (
         int(checkpoint.get('epoch', -1)) + 1,
         float(checkpoint.get('best_val', float('inf'))),
@@ -217,7 +237,8 @@ def train_fusion(args, logger):
     start_epoch, best_val, history = 0, float('inf'), []
     if args.resume:
         start_epoch, best_val, history = load_checkpoint(
-            args.resume, model, optimizer, scheduler, scaler, device
+            args.resume, model, optimizer, scheduler, scaler, device,
+            [loader for loader in (train_loader, val_loader) if loader is not None]
         )
         logger.info('Resumed %s at epoch %d', args.resume, start_epoch)
 
@@ -244,7 +265,7 @@ def train_fusion(args, logger):
             scaler.scale(losses[0]).backward()
             if args.grad_clip > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip, error_if_nonfinite=not amp)
             scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
@@ -270,6 +291,8 @@ def train_fusion(args, logger):
             if val_loader is not None
             else None
         )
+        if val_values is not None and not np.isfinite(val_values).all():
+            raise FloatingPointError(f'Non-finite validation loss in epoch {epoch + 1}')
         record = {
             'epoch': epoch + 1,
             'lr': optimizer.param_groups[0]['lr'],
@@ -294,12 +317,14 @@ def train_fusion(args, logger):
         scheduler.step()
         save_checkpoint(
             output_dir / 'last.pth', model, optimizer, scheduler, scaler,
-            epoch, best_val, history, args
+            epoch, best_val, history, args,
+            [loader for loader in (train_loader, val_loader) if loader is not None]
         )
         if improved:
             save_checkpoint(
                 output_dir / 'best.pth', model, optimizer, scheduler, scaler,
-                epoch, best_val, history, args
+                epoch, best_val, history, args,
+                [loader for loader in (train_loader, val_loader) if loader is not None]
             )
         with (output_dir / 'history.json').open('w', encoding='utf-8') as handle:
             json.dump(history, handle, ensure_ascii=False, indent=2)

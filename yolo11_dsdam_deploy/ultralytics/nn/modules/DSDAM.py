@@ -151,7 +151,9 @@ class DSDAM(nn.Module):
             attn = F.softmax(attn, dim=-1)
             x = attn @ v
 
-        x = x.permute(0, 2, 1, 3).contiguous().view(B, self.out_channels, H, W)
+        # (batch, head, pixel, channel_per_head) -> NCHW. Keep each
+        # channel's spatial sequence contiguous before restoring H and W.
+        x = x.permute(0, 1, 3, 2).contiguous().view(B, self.out_channels, H, W)
         x = self.out_proj(x)
         if energy_map is not None:
             x = x * (1.0 + energy_map)
