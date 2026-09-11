@@ -105,7 +105,9 @@ class DSDAM(nn.Module):
             v = v.reshape(batch, self.num_heads, height * width, head_dim)
             x = ((q @ k.transpose(-2, -1)) / (head_dim**0.5)).softmax(dim=-1) @ v
 
-        x = x.permute(0, 2, 1, 3).contiguous().view(batch, self.out_channels, height, width)
+        # [B, heads, pixels, head_dim] -> [B, heads, head_dim, pixels].
+        # Keep spatial positions intact when merging heads into channels.
+        x = x.permute(0, 1, 3, 2).contiguous().view(batch, self.out_channels, height, width)
         return self.relu(self.norm(self.out_proj(x) + residual))
 
 
@@ -142,3 +144,18 @@ class CrossModalDSDAM(nn.Module):
         aligned_ir, aligned_vis = self.enhancer(pair, pair_offsets).chunk(2, dim=0)
         confidence = torch.exp(-torch.mean(torch.abs(aligned_ir - aligned_vis), dim=1, keepdim=True))
         return aligned_ir, aligned_vis, confidence
+
+
+class IndependentDSDAM(nn.Module):
+    """Shared enhancer, but each sample predicts offsets from its own modality.
+
+    Batched evaluation matches the joint variant's BatchNorm treatment. This is
+    not two independently parameterized encoders and is not geometric alignment.
+    """
+    def __init__(self, channels, r=2, num_heads=4, window_size=8):
+        super().__init__()
+        self.enhancer = DSDAM(channels, channels, r, num_heads, window_size)
+
+    def forward(self, infrared, visible):
+        a, b = self.enhancer(torch.cat([infrared, visible], dim=0)).chunk(2, dim=0)
+        return a, b, None

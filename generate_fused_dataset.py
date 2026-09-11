@@ -26,7 +26,8 @@ def load_model(checkpoint_path, device, disable_dsdam, share_encoder_weights):
     shared = saved_args.get('share_encoder_weights', share_encoder_weights)
     weighting_mode = saved_args.get('weighting_mode', 'acgaw')
     model = VSSM_Fusion(use_dsdam=use_dsdam, share_encoder_weights=shared,
-                        weighting_mode=weighting_mode).to(device)
+                        weighting_mode=weighting_mode,
+                        spatial_mode=saved_args.get('spatial_mode')).to(device)
     state = checkpoint.get('model', checkpoint) if isinstance(checkpoint, dict) else checkpoint
     model.load_state_dict(state)
     model.eval()

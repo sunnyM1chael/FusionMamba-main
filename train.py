@@ -221,6 +221,7 @@ def train_fusion(args, logger):
         use_dsdam=not args.disable_dsdam,
         share_encoder_weights=args.share_encoder_weights,
         weighting_mode=args.weighting_mode,
+        spatial_mode=getattr(args, 'spatial_mode', None),
     ).to(device)
     criterion = Fusionloss().to(device)
     optimizer = torch.optim.AdamW(
@@ -387,6 +388,8 @@ def parse_args():
     parser.add_argument('--amp_dtype', choices=('bfloat16', 'float16'), default='float16',
                         help='Only applies with --amp; validate numerical stability first')
     parser.add_argument('--disable_dsdam', action='store_true', help='Ablate SACAFM alignment')
+    parser.add_argument('--spatial_mode', choices=('none', 'independent', 'joint'), default=None,
+                        help='SADFFM spatial control; overrides legacy use_dsdam switch')
     parser.add_argument('--weighting_mode', choices=('equal', 'learned', 'acgaw'), default='acgaw',
                         help='Modality weighting ablation: fixed, unguided learned, or confidence-guided')
     parser.add_argument('--share_encoder_weights', action='store_true')

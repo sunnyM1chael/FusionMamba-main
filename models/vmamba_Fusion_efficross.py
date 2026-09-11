@@ -14,7 +14,7 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 from models.cross import VSSBlock_Cross_new
 from models.cross import VSSBlock_new
-from DSDAM import CrossModalDSDAM
+from DSDAM import CrossModalDSDAM, IndependentDSDAM
 
 try:
     from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
@@ -756,9 +756,13 @@ class SACAFM(nn.Module):
 
     def __init__(self, hidden_dim, use_alignment=True, drop_path=0.0,
                  norm_layer=nn.LayerNorm, attn_drop_rate=0.0, d_state=16,
-                 weighting_mode='acgaw'):
+                 weighting_mode='acgaw', spatial_mode=None):
         super().__init__()
-        self.aligner = CrossModalDSDAM(hidden_dim) if use_alignment else None
+        mode = spatial_mode or ('joint' if use_alignment else 'none')
+        if mode not in ('none', 'independent', 'joint'):
+            raise ValueError(f'Unknown spatial mode: {mode}')
+        self.aligner = (CrossModalDSDAM(hidden_dim) if mode == 'joint' else
+                        IndependentDSDAM(hidden_dim) if mode == 'independent' else None)
         self.fusion = VSSBlock_Cross_new(
             hidden_dim=hidden_dim,
             drop_path=drop_path,
@@ -785,7 +789,7 @@ class VSSM_Fusion(nn.Module):
                  attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True,
                  use_checkpoint=False, use_dsdam=False, share_encoder_weights=False,
-                 weighting_mode='acgaw', **kwargs):
+                 weighting_mode='acgaw', spatial_mode=None, **kwargs):
         # 【改动点3】移除 dsdam_positions 参数, 新增 share_encoder_weights 开关
         #   之前: use_dsdam + dsdam_positions(['pre'/'post']) 控制 DSDAM 位置
         #   现在: 仅保留 use_dsdam 开关, DSDAM 统一放在每层 DFFM 输入前(论文规则3)
@@ -889,6 +893,7 @@ class VSSM_Fusion(nn.Module):
                 attn_drop_rate=attn_drop_rate,
                 d_state=d_state,
                 weighting_mode=weighting_mode,
+                spatial_mode=spatial_mode,
             )
             for i_layer in range(self.num_layers)
         ])
@@ -1065,6 +1070,5 @@ class VSSM_Fusion(nn.Module):
 #     x2 = torch.rand((4, 1, 256, 256)).cuda()
 #     a = net(x1, x2).cuda()
 #     print(a.shape)
-
 
 
