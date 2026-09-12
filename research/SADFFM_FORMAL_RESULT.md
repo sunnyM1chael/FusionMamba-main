@@ -81,3 +81,21 @@ Raw analysis: research/results/formal_validation_analysis_v1.json locally and
 formal_validation_analysis_v1.json in the server formal-run root. Analysis used
 109 frozen validation pairs, deterministic 10,000-draw paired bootstrap seed
 20260911, and took approximately 237 seconds of server execution.
+
+## Matched-region correction (2026-09-11)
+
+The v1 clean row used the full image, whereas shifted rows used an 8-pixel crop.
+Within-condition A/B/C comparisons remain valid, but clean-to-shift degradation
+must use the same evaluation region. v2 preserves the full-image clean row and
+adds clean_crop8_0 using the same clean forward output. No retraining occurred.
+
+| Mode | Clean crop8 loss | Right8 increase from matched clean | Down8 increase |
+|---|---:|---:|---:|
+| A | 1.883666070 | 0.783332131 | 0.960756211 |
+| B | 1.886856917 | 0.775639406 | 0.949640698 |
+| C | 1.885655149 | 0.778349708 | 0.955815211 |
+
+This correction does not reverse the main developmental decision. v2 execution
+took 163.3 seconds. Image bootstrap intervals are conditional on one trained seed;
+they do not measure training reproducibility, and scene independence is unverified.
+Raw output: research/results/formal_validation_analysis_v2.json.

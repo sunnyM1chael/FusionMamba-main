@@ -16,7 +16,7 @@ from loss import Fusionloss
 from models.vmamba_Fusion_efficross import VSSM_Fusion
 
 ROOT = Path('/root/autodl-fs/research_protocol/v1/runs/spatial_formal_corrected_seed42_v1')
-OUT = ROOT / 'formal_validation_analysis_v1.json'
+OUT = ROOT / 'formal_validation_analysis_v2.json'
 if OUT.exists():
     raise FileExistsError(OUT)
 manifest = Path('/root/autodl-fs/research_protocol/v1/development_splits/msrs/val.txt')
@@ -54,7 +54,8 @@ result = {'protocol': {'dataset': 'MSRS frozen validation only', 'pairs': 109,
                        'conditions': conditions, 'shifted_modality': 'visible',
                        'shift_padding': 'replicate', 'shift_evaluation':
                        'loss against original aligned IR/VIS, cropped by 8 pixels on every boundary',
-                       'warning': 'Synthetic sensitivity/recovery test, not real unregistered data or geometric ground truth.',
+                       'clean_evaluation': 'clean_0 is full image; clean_crop8_0 uses the same crop as shifts',
+                       'warning': 'Synthetic sensitivity/recovery test, not real unregistered data or geometric ground truth. Image bootstrap is conditional on one trained seed, not training reproducibility; scene independence is unverified.',
                        'bootstrap': 'paired image resampling, 10000 draws, seed 20260911'}, 'modes': {}}
 start_time = time.monotonic()
 for mode in modes:
@@ -77,6 +78,7 @@ for mode in modes:
     del best_state
     rows = []
     by_condition = {f'{a}_{n}': [] for a, n in conditions}
+    by_condition['clean_crop8_0'] = []
     with torch.inference_mode():
         for index in range(len(dataset)):
             vis, ir = dataset[index]
@@ -97,6 +99,11 @@ for mode in modes:
                 key = f'{axis}_{amount}'
                 row['losses'][key] = losses
                 by_condition[key].append(losses)
+                if amount == 0:
+                    cropped = [float(x) for x in criterion(vis[..., 8:-8, 8:-8],
+                               ir[..., 8:-8, 8:-8], None, output[..., 8:-8, 8:-8], 0)]
+                    row['losses']['clean_crop8_0'] = cropped
+                    by_condition['clean_crop8_0'].append(cropped)
             rows.append(row)
             if (index + 1) % 25 == 0:
                 print(mode, index + 1, round(time.monotonic() - start_time, 1), flush=True)
@@ -113,6 +120,7 @@ for mode in modes:
     del model
     torch.cuda.empty_cache()
 
+conditions.append(('clean_crop8', 0))
 for challenger in ('independent', 'joint'):
     paired = {}
     for axis, amount in conditions:
@@ -127,6 +135,17 @@ delta = [result['modes']['joint']['rows'][i]['losses']['clean_0'][0] -
 result['paired_joint_minus_independent_clean'] = {'mean_delta': statistics.mean(delta),
                                                   'ci95': boot_ci(delta),
                                                   'joint_wins': sum(x < 0 for x in delta)}
+for mode in modes:
+    degradation = {}
+    for axis, amount in conditions:
+        if not amount:
+            continue
+        key = f'{axis}_{amount}'
+        delta = [row['losses'][key][0] - row['losses']['clean_crop8_0'][0]
+                 for row in result['modes'][mode]['rows']]
+        degradation[key] = {'mean_increase_from_matched_clean': statistics.mean(delta),
+                            'paired_ci95': boot_ci(delta)}
+    result['modes'][mode]['matched_crop_degradation'] = degradation
 result['elapsed_seconds'] = time.monotonic() - start_time
 OUT.write_text(json.dumps(result, indent=2))
 print('ALL_ANALYSIS_COMPLETE', round(result['elapsed_seconds'], 1), OUT, flush=True)
