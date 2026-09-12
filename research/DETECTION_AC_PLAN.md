@@ -1,5 +1,11 @@
 # A/C downstream development decision — 2026-09-11
 
+COMPLETE 2026-09-12 20:59 CST: A/C each completed 150 YOLO11s epochs and best
+checkpoint reload. See DETECTION_AC_FORMAL_RESULT.md. Seed42 C improves validation
+AP50:95 by 0.549 percentage points over A, with higher recall and nearly unchanged
+AP50, but this remains a single-seed development result. Next gate is two more
+matched A/C seeds before retaining SADFFM or running external comparisons.
+
 LIVE 2026-09-12 13:38 CST: both full exports are complete. The detached
 run_detection_ac_formal.py queue has been launched (initial PID 6980), logging
 to /root/autodl-fs/research_protocol/v1/runs/detection_ac_formal_v1.log. It first
