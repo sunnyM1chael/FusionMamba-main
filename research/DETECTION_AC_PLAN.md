@@ -17,6 +17,16 @@ RESUMED 2026-09-12: exporter now validates every existing PNG's decode, shape,
 dtype and copied-label hash before reuse; new images use atomic partial-file
 replacement. A/C export resumed. Formal YOLO11s remains release-gated.
 
+INODE RECOVERY 2026-09-12 12:49 CST: C export stopped at 10,055/10,825 train
+images because the 200,000-file data-disk inode quota was full (78 GB remained).
+No formal training had started. The redundant, reproducible LLVIP visible YOLO
+view was archived before removal at
+llvip_yolo/visible_derived_archive_20260912.tar: 30,990 archive entries, SHA256
+3f5ee038519b87826b93c559eadb1523ddc759b84931e27667758aea4b7736ec.
+The raw LLVIP dataset and infrared YOLO view were not changed. This released
+30,990 inodes (85% used), and the verified-resume exporter was relaunched. The
+archive is recoverable with tar if that derived visible-only view is needed.
+
 Before detector results, the frozen validation size audit counted 3,778 boxes:
 only 2 have native area <32^2, and only 13 have resized-to-640 area <32^2. Thus
 LLVIP can support the overall fusion-to-person-detection decision but cannot
