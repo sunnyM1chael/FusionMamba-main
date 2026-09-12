@@ -29,7 +29,12 @@ def verify_export(mode):
     assert len(list((folder / 'labels/train').glob('*.txt'))) == 10825
     assert len(list((folder / 'labels/val').glob('*.txt'))) == 1200
     seen = set()
-    for row in report['rows']:
+    protocol = ROOT.parents[1] / 'development_splits/llvip'
+    expected = {(split, Path(name).stem + '.png')
+                for split in ('train', 'val')
+                for name in (protocol / f'{split}.txt').read_text().splitlines() if name.strip()}
+    assert {(r['split'], r['output']) for r in report['rows']} == expected
+    for index, row in enumerate(report['rows'], 1):
         key = (row['split'], row['output'])
         assert key not in seen
         seen.add(key)
@@ -37,6 +42,11 @@ def verify_export(mode):
         label = folder / 'labels' / row['split'] / f"{Path(row['output']).stem}.txt"
         assert hashlib.sha256(image.read_bytes()).hexdigest() == row['sha256']
         assert hashlib.sha256(label.read_bytes()).hexdigest() == row['label_sha256']
+        original_label = ROOT.parents[1] / 'llvip_yolo/infrared/labels' / row['split'] / label.name
+        assert hashlib.sha256(original_label.read_bytes()).hexdigest() == row['label_sha256']
+        if index % 2000 == 0:
+            print('VERIFY', mode, index, flush=True)
+    print('EXPORT_VERIFIED', mode, len(seen), flush=True)
 
 
 def run(mode, stage):
@@ -53,6 +63,9 @@ def main():
     assert json.loads((ROOT / 'status.json').read_text())['phase'] == 'READY_FOR_FORMAL_REVIEW'
     for mode in ('none', 'joint'):
         verify_export(mode)
+    reports = [json.loads((ROOT / 'full' / mode / 'export.json').read_text()) for mode in ('none', 'joint')]
+    assert {(r['split'], r['source'], r['label_sha256']) for r in reports[0]['rows']} == {
+        (r['split'], r['source'], r['label_sha256']) for r in reports[1]['rows']}
     metric_groups = Path('/root/autodl-fs/research_protocol/v1/results/llvip_detection_metric_groups_v1.json')
     assert metric_groups.is_file()
     run('none', 'pilot')

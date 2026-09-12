@@ -1,5 +1,16 @@
 # A/C downstream development decision — 2026-09-11
 
+LIVE 2026-09-12 13:38 CST: both full exports are complete. The detached
+run_detection_ac_formal.py queue has been launched (initial PID 6980), logging
+to /root/autodl-fs/research_protocol/v1/runs/detection_ac_formal_v1.log. It first
+verifies all image/label hashes and exact frozen manifest membership, then runs
+the three-epoch full-data YOLO11s pilot, A150 and C150 serially. During initial
+verification formal_status.json does not yet exist: check the process and log
+before attempting a launch to avoid duplicates. A process failure stops chaining.
+Fixed training sample 020001 from the C preflight was visually inspected: normal
+dimensions and grayscale content with recognizable pedestrian silhouettes; this
+is an execution check, not a quality or detection-performance claim.
+
 UPDATE 2026-09-12: proceed with official YOLO11s as the primary detector. The
 existing local yolo11s.pt was detected as a truncated ZIP (1,471,531 bytes) and
 must never be used. Server file yolo11s_official.pt was downloaded from the
@@ -84,7 +95,7 @@ small-object group, report its count and explicitly distinguish it from resized
 640-coordinate small-object definitions. Implement/test evaluator before claims;
 if native small count is inadequate, disclose rather than tune the threshold on AP.
 
-Then launch standard YOLO11n A and C serially, same pretrained file, seed42,
+Then launch standard YOLO11s A and C serially, same pretrained file, seed42,
 150 epochs, batch16, imgsz640, AdamW lr0=.001, lrf=.01, cosine, warmup3,
 weight_decay=.0005, no early stop (patience0), close_mosaic10, FP32,
 deterministic=True. train_detection_ac.py enforces exact initial tensor hash,
