@@ -28,7 +28,7 @@ class StrictTrainer(DetectionTrainer):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=('none', 'joint', 'infrared'), required=True)
+    parser.add_argument('--mode', choices=('none', 'joint', 'infrared', 'visible'), required=True)
     parser.add_argument('--stage', choices=('smoke', 'pilot', 'full'), required=True)
     args = parser.parse_args()
     weights = SOURCE / ('yolo11n.pt' if args.stage == 'smoke' else 'yolo11s_official.pt')
@@ -51,7 +51,7 @@ def main():
             digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
         value = digest.hexdigest()
         reference = ROOT / args.stage / 'none' / 'initialization.json'
-        if args.mode in ('joint', 'infrared'):
+        if args.mode in ('joint', 'infrared', 'visible'):
             assert json.loads(reference.read_text())['model_sha256'] == value, 'A/C initialization mismatch'
         (folder / 'initialization.json').write_text(json.dumps({'model_sha256': value}))
 
