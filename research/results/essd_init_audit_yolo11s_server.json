@@ -1,0 +1,51 @@
+{
+  "weights": "/autodl-fs/data/research_protocol/v1/pretrained/yolo11s.pt",
+  "weights_sha256": "85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5",
+  "nc": 6,
+  "seed": 42,
+  "variants": [
+    {
+      "variant": "baseline",
+      "scale": "s",
+      "parameters": 9430114,
+      "full_initialized_model_sha256": "452265987bc30358b67bcad427c2a591af8c0c1cba8719a5f3dae28aec79d571",
+      "transferred_tensors": 378,
+      "target_tensors": 499,
+      "new_tensors": 103,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    },
+    {
+      "variant": "essd",
+      "scale": "s",
+      "parameters": 13541633,
+      "full_initialized_model_sha256": "b6cc275845b41a6cf32281ec4cb4553d896d86b54fa6161ed80cb5c9d2702b62",
+      "transferred_tensors": 378,
+      "target_tensors": 650,
+      "new_tensors": 236,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    },
+    {
+      "variant": "dsdam_only",
+      "scale": "s",
+      "parameters": 13395675,
+      "full_initialized_model_sha256": "7cba64b66399328a54fe87666388e30302dbf49fb00eda34e7f0442d83504073",
+      "transferred_tensors": 378,
+      "target_tensors": 556,
+      "new_tensors": 157,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    },
+    {
+      "variant": "p2_only",
+      "scale": "s",
+      "parameters": 9576072,
+      "full_initialized_model_sha256": "08245c9ad9efbc19a741da8d9e62b8d67a3c2bb0e71455f2db5c6f11e9b7f920",
+      "transferred_tensors": 378,
+      "target_tensors": 593,
+      "new_tensors": 182,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    }
+  ],
+  "common_pretrained_tensor_count": true,
+  "common_pretrained_source_hash": true,
+  "status": "pass"
+}

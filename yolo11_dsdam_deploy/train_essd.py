@@ -1,7 +1,11 @@
 """Train ESSD-Head while retaining compatible YOLO11 pretrained features."""
 
-from argparse import ArgumentParser
+from argparse import ArgumentParser, BooleanOptionalAction
+import hashlib
+import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -27,6 +31,7 @@ P2_ONLY_MAP = {
     **{i: j for i, j in zip(range(17, 23), range(23, 29))},
 }
 VARIANTS = {
+    "baseline": ("yolo11.yaml", {i: i for i in range(23)}),
     "essd": ("yolo11-essd.yaml", ESSD_MAP),
     "dsdam_only": ("yolo11-essd-dsdam-only.yaml", DSDAM_ONLY_MAP),
     "p2_only": ("yolo11-essd-p2-only.yaml", P2_ONLY_MAP),
@@ -57,8 +62,12 @@ def validate_checkpoint_isolated(trainer):
         "from ultralytics import YOLO; import sys; "
         "YOLO(sys.argv[1]).val(data=sys.argv[2], imgsz=int(sys.argv[3]), "
         "batch=int(sys.argv[4]), device=sys.argv[5], workers=int(sys.argv[6]), "
-        "project=sys.argv[7], name=sys.argv[8], exist_ok=True, plots=False)"
+        "project=sys.argv[7], name=sys.argv[8], exist_ok=True, plots=False, "
+        "split='val', rect=False, half=False)"
     )
+    env = os.environ.copy()
+    deploy_root = str(Path(__file__).resolve().parent)
+    env["PYTHONPATH"] = deploy_root + os.pathsep + env.get("PYTHONPATH", "")
     subprocess.run(
         [
             sys.executable,
@@ -73,6 +82,8 @@ def validate_checkpoint_isolated(trainer):
             str(trainer.args.project),
             f"{trainer.args.name}_best_val",
         ],
+        cwd=deploy_root,
+        env=env,
         check=True,
     )
 
@@ -82,6 +93,7 @@ def transfer_pretrained(model, weights, layer_index_map):
     source = YOLO(str(weights)).model.state_dict()
     target = model.state_dict()
     transferred = {}
+    source_digest = hashlib.sha256()
 
     for key, value in source.items():
         parts = key.split(".")
@@ -94,13 +106,48 @@ def transfer_pretrained(model, weights, layer_index_map):
         target_key = ".".join(parts)
         if target_key in target and target[target_key].shape == value.shape:
             transferred[target_key] = value
+            # Hash source names and values, not remapped target indices, so
+            # common pretrained tensors can be compared across architectures.
+            source_digest.update(key.encode("utf-8"))
+            source_digest.update(value.detach().cpu().contiguous().numpy().tobytes())
 
     incompatible = model.load_state_dict(transferred, strict=False)
     print(
         f"Transferred {len(transferred)}/{len(target)} compatible tensors; "
-        f"new ESSD tensors={len(incompatible.missing_keys)}"
+        f"new or task-specific tensors={len(incompatible.missing_keys)}"
     )
-    return len(transferred)
+    return {
+        "transferred_tensors": len(transferred),
+        "target_tensors": len(target),
+        "new_tensors": len(incompatible.missing_keys),
+        "source_tensor_sha256": source_digest.hexdigest(),
+    }
+
+
+def scaled_model_path(base_path, scale):
+    """Return a virtual scaled YAML name resolved by Ultralytics to the base YAML."""
+    path = Path(base_path)
+    if not path.stem.startswith("yolo11"):
+        return path
+    suffix = path.stem[len("yolo11"):]
+    suffix = re.sub(r"^[nslmx]", "", suffix)
+    return path.with_name(f"yolo11{scale}{suffix}{path.suffix}")
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def model_state_sha256(model):
+    digest = hashlib.sha256()
+    for key, value in model.state_dict().items():
+        digest.update(key.encode("utf-8"))
+        digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def train_args(args, model_path):
@@ -122,6 +169,15 @@ def train_args(args, model_path):
         "deterministic": args.deterministic,
         "patience": args.patience,
         "optimizer": args.optimizer,
+        "lr0": args.lr0,
+        "lrf": args.lrf,
+        "weight_decay": args.weight_decay,
+        "warmup_epochs": args.warmup_epochs,
+        "amp": args.amp,
+        "cache": False,
+        "rect": False,
+        "plots": False,
+        "pretrained": False,
         "cos_lr": True,
         "close_mosaic": 10,
     }
@@ -131,16 +187,22 @@ def parse_args():
     root = Path(__file__).resolve().parent
     parser = ArgumentParser(description="Train YOLO11 ESSD-Head on fused M3FD images")
     parser.add_argument("--data", required=True, help="YOLO dataset YAML")
-    parser.add_argument("--weights", default=str(root.parent / "yolo11n.pt"))
-    parser.add_argument("--variant", choices=("baseline", *VARIANTS), default="essd")
+    parser.add_argument("--scale", choices=("n", "s"), default="s")
+    parser.add_argument("--weights", help="Pretrained checkpoint; defaults to yolo11<scale>.pt")
+    parser.add_argument("--variant", choices=tuple(VARIANTS), default="essd")
     parser.add_argument("--model", help="Explicit model YAML; uses the selected variant's transfer map")
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--device", default="0")
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--patience", type=int, default=40)
+    parser.add_argument("--patience", type=int, default=0, help="0 disables early stopping for fixed-epoch ablation")
     parser.add_argument("--optimizer", default="AdamW")
+    parser.add_argument("--lr0", type=float, default=0.001)
+    parser.add_argument("--lrf", type=float, default=0.01)
+    parser.add_argument("--weight-decay", type=float, default=0.0005)
+    parser.add_argument("--warmup-epochs", type=float, default=3.0)
+    parser.add_argument("--amp", action=BooleanOptionalAction, default=True)
     parser.add_argument("--project", default="runs/essd")
     parser.add_argument("--name", help="Run name; defaults to m3fd_<variant>")
     parser.add_argument("--seed", type=int, default=42)
@@ -154,35 +216,49 @@ def parse_args():
 
 def main():
     args = parse_args()
+    root = Path(__file__).resolve().parent
+    weights = Path(args.weights) if args.weights else root.parent / f"yolo11{args.scale}.pt"
+    if not weights.exists():
+        raise FileNotFoundError(f"Pretrained checkpoint not found: {weights}")
     # New modules are initialized before the trainer exists.
     init_seeds(args.seed, deterministic=False)
-    if args.variant == "baseline":
-        if args.model:
-            raise ValueError("--model is not used with the baseline variant")
-        model = YOLO(args.weights)
-        model.train(**train_args(args, args.weights))
-    else:
-        filename, layer_map = VARIANTS[args.variant]
-        model_path = args.model or str(Path(__file__).resolve().parent / "ultralytics/cfg/models/11" / filename)
-        overrides = train_args(args, model_path)
-        # Build the dataset-specific head exactly once. Going through YOLO.train()
-        # would rebuild a YAML model after discovering nc and executes a second
-        # DSDAM stride-probing forward in the same process. This must also happen
-        # before the trainer enables deterministic algorithms: torchvision's CPU
-        # deformable-convolution probe is not compatible with that global flag.
-        data = check_det_dataset(args.data)
-        model = DetectionModel(
-            model_path,
-            nc=data["nc"],
-            ch=data["channels"],
-            verbose=True,
-        )
-        model.task = "detect"
-        transfer_pretrained(model, args.weights, layer_map)
-        trainer = SingleBuildDetectionTrainer(overrides=overrides)
-        trainer.model = model
-        trainer.train()
-        validate_checkpoint_isolated(trainer)
+    filename, layer_map = VARIANTS[args.variant]
+    base_model_path = Path(args.model) if args.model else root / "ultralytics/cfg/models/11" / filename
+    model_path = scaled_model_path(base_model_path, args.scale)
+    overrides = train_args(args, model_path)
+    # Build the dataset-specific head exactly once. Going through YOLO.train()
+    # would rebuild a YAML model after discovering nc and execute a second
+    # DSDAM stride-probing forward in the same process. This must also happen
+    # before the trainer enables deterministic algorithms: torchvision's CPU
+    # deformable-convolution probe is not compatible with that global flag.
+    data = check_det_dataset(args.data)
+    model = DetectionModel(
+        model_path,
+        nc=data["nc"],
+        ch=data["channels"],
+        verbose=True,
+    )
+    model.task = "detect"
+    initialization = transfer_pretrained(model, weights, layer_map)
+    trainer = SingleBuildDetectionTrainer(overrides=overrides)
+    trainer.model = model
+    trainer.save_dir.mkdir(parents=True, exist_ok=True)
+    audit = {
+        "variant": args.variant,
+        "scale": args.scale,
+        "weights": str(weights.resolve()),
+        "weights_sha256": file_sha256(weights),
+        "seed": args.seed,
+        "model_parameters": sum(p.numel() for p in model.parameters()),
+        "full_initialized_model_sha256": model_state_sha256(model),
+        "train_args": train_args(args, model_path),
+        **initialization,
+    }
+    (trainer.save_dir / "initialization_audit.json").write_text(
+        json.dumps(audit, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    trainer.train()
+    validate_checkpoint_isolated(trainer)
 
 
 if __name__ == "__main__":

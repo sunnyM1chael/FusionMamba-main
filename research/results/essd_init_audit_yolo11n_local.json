@@ -1,0 +1,51 @@
+{
+  "weights": "E:\\EdgeDownload\\FusionMamba-main\\yolo11n.pt",
+  "weights_sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+  "nc": 6,
+  "seed": 42,
+  "variants": [
+    {
+      "variant": "baseline",
+      "scale": "n",
+      "parameters": 2591010,
+      "full_initialized_model_sha256": "2d8db5efa6a2aefdd7d34a0389fb3c6f1f5a52a483cd22dc0164a65806737ccf",
+      "transferred_tensors": 378,
+      "target_tensors": 499,
+      "new_tensors": 103,
+      "source_tensor_sha256": "dec26a2240cccad44133800e9ca14a92539c74bf4a1a43495248299fc60467a3"
+    },
+    {
+      "variant": "essd",
+      "scale": "n",
+      "parameters": 3673393,
+      "full_initialized_model_sha256": "35441b9984ae19ffe8188adf2862c30569aa7e46d6082c1a7051377a2ecf65b6",
+      "transferred_tensors": 378,
+      "target_tensors": 650,
+      "new_tensors": 236,
+      "source_tensor_sha256": "dec26a2240cccad44133800e9ca14a92539c74bf4a1a43495248299fc60467a3"
+    },
+    {
+      "variant": "dsdam_only",
+      "scale": "n",
+      "parameters": 3596923,
+      "full_initialized_model_sha256": "11cbd81e147f2529a516cd013fdd12aaa40f9f0af28a99b4dad99e29bb7c4d55",
+      "transferred_tensors": 378,
+      "target_tensors": 556,
+      "new_tensors": 157,
+      "source_tensor_sha256": "dec26a2240cccad44133800e9ca14a92539c74bf4a1a43495248299fc60467a3"
+    },
+    {
+      "variant": "p2_only",
+      "scale": "n",
+      "parameters": 2667480,
+      "full_initialized_model_sha256": "70a49e28bd16da5adda2a48e4c077215672a927cd2f814b40d91cdc06ab9d367",
+      "transferred_tensors": 378,
+      "target_tensors": 593,
+      "new_tensors": 182,
+      "source_tensor_sha256": "dec26a2240cccad44133800e9ca14a92539c74bf4a1a43495248299fc60467a3"
+    }
+  ],
+  "common_pretrained_tensor_count": true,
+  "common_pretrained_source_hash": true,
+  "status": "pass"
+}

@@ -1,0 +1,51 @@
+{
+  "weights": "C:\\Users\\23684\\AppData\\Local\\Temp\\yolo11s_official_8.3.0.pt",
+  "weights_sha256": "85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5",
+  "nc": 6,
+  "seed": 42,
+  "variants": [
+    {
+      "variant": "baseline",
+      "scale": "s",
+      "parameters": 9430114,
+      "full_initialized_model_sha256": "04cca76214c83fdce6e129b93201bb935574b54b2269c68f8f50b260e340596d",
+      "transferred_tensors": 378,
+      "target_tensors": 499,
+      "new_tensors": 103,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    },
+    {
+      "variant": "essd",
+      "scale": "s",
+      "parameters": 13541633,
+      "full_initialized_model_sha256": "53e3ace44aaaf686f5dddbbbc4b820e28110aa9004e40cf6df6e7d06bb47e7b3",
+      "transferred_tensors": 378,
+      "target_tensors": 650,
+      "new_tensors": 236,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    },
+    {
+      "variant": "dsdam_only",
+      "scale": "s",
+      "parameters": 13395675,
+      "full_initialized_model_sha256": "3b7b31891b965422ea2072f48908b3a34b534a6a3f2db235ecaa6e3e36491d14",
+      "transferred_tensors": 378,
+      "target_tensors": 556,
+      "new_tensors": 157,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    },
+    {
+      "variant": "p2_only",
+      "scale": "s",
+      "parameters": 9576072,
+      "full_initialized_model_sha256": "75a9b0dfd6ec07b702725900b99a8a6e4d8afdb4e1202f24234214a76b1569a5",
+      "transferred_tensors": 378,
+      "target_tensors": 593,
+      "new_tensors": 182,
+      "source_tensor_sha256": "5b0296b8d6061b5568891359ac672df19c93454eefff20662769b8656a996756"
+    }
+  ],
+  "common_pretrained_tensor_count": true,
+  "common_pretrained_source_hash": true,
+  "status": "pass"
+}
