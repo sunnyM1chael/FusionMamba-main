@@ -36,6 +36,12 @@ remain uncertain because a moving-camera sequence can cross tunnels, roads, or
 nearby viewpoints. These labels are triage evidence only; uncertain transitions
 must not be used to freeze groups without adjacent context.
 
+Ranks 21--40 have also been reviewed in
+`research/results/m3fd_boundary_review_21_40_v1.csv`: 7 are high-confidence
+boundaries, 6 are compatible with same-scene motion, and 7 remain uncertain.
+Across ranks 1--40 the running totals are therefore 16/11/13. No group manifest
+is frozen from these transition labels alone.
+
 ## Frozen fallback if original metadata cannot be recovered
 
 Create and explicitly name a **custom scene-disjoint protocol**, never an
