@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+import argparse
 from pathlib import Path
 
 os.environ['OMP_NUM_THREADS']='1'
@@ -19,7 +20,10 @@ from analyze_detection_errors import BASE,ROOT,OUT,ious,match
 
 
 def main():
-    dest=OUT/'cpu_input_probe_v1'
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--matched-val-preprocess',action='store_true')
+    args=parser.parse_args()
+    dest=OUT/('cpu_input_probe_v2' if args.matched_val_preprocess else 'cpu_input_probe_v1')
     dest.mkdir(exist_ok=False)
     objects=json.loads((OUT/'failure_mechanisms_v1/objects.json').read_text())
     selected=[];used=set()
@@ -38,7 +42,9 @@ def main():
         'control':'C globally adjusted to blended image mean/std, then clipped; no labels used in transforms.',
         'scope':'24 outcome-stratified images, exploratory selected sample; no full-set AP claim.',
         'device':'cpu','threads':1,'confidence':0.001,'nms_iou':0.7,'match_confidence':0.25,
-        'match_iou':0.5,'rect':True,'batch':1},indent=2))
+        'match_iou':0.5,'rect':not args.matched_val_preprocess,'batch':1,
+        'matched_val_preprocess':args.matched_val_preprocess,
+        'expected_canvas':'640x640' if args.matched_val_preprocess else '512x640'},indent=2))
     model=YOLO(str(ROOT/'joint/detector/weights/best.pt'))
     records=[];start=time.monotonic()
     for n,target in enumerate(selected,1):
@@ -58,7 +64,8 @@ def main():
         for name,a in (('original',c),('blend_0.25IR',blend),('moment_control',control)):
             im=np.repeat(np.clip(np.rint(a),0,255).astype(np.uint8)[:,:,None],3,axis=2)
             t=time.monotonic()
-            prediction=model.predict(im,device='cpu',imgsz=640,batch=1,rect=True,
+            prediction=model.predict(im,device='cpu',imgsz=640,batch=1,
+                rect=not args.matched_val_preprocess,
                 conf=0.001,iou=0.7,max_det=300,half=False,verbose=False)[0]
             bb=prediction.boxes.xyxy.cpu().numpy();scores=prediction.boxes.conf.cpu().numpy()
             order=np.argsort(-scores);bb=bb[order];scores=scores[order]
@@ -68,6 +75,7 @@ def main():
                 'target_hit':j in hits,'target_score_iou05':float(scores[valid].max()) if valid.any() else 0,
                 'target_best_iou':float(mat[:,j].max()) if len(mat) else 0,
                 'tp':len(hits),'fp':int((scores>=0.25).sum())-len(hits),'fn':len(gt)-len(hits),
+                'input_mean':float(im.mean()/255),'input_std':float(im.std()/255),
                 'seconds':time.monotonic()-t})
             with (dest/'records.jsonl').open('a') as f:f.write(json.dumps(records[-1])+'\n')
         print(json.dumps({'images':n,'total':24,'elapsed_seconds':time.monotonic()-start}),flush=True)

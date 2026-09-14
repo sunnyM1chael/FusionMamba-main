@@ -27,3 +27,23 @@ for a larger fixed diagnostic subset (same alpha, same controls, no tuning).
 Raw server output: results/detection_error_analysis_v1/cpu_input_probe_v1/
 protocol.json,records.jsonl,summary.json,complete.json. Rounding/clipping means
 moment control is approximate; next audit should measure achieved moments.
+
+## Matched-canvas rerun
+
+The formal validator used rect=false and a640x640 canvas; v1 single-image
+predict used rect=true and512x640. V2 repeated the same24×3 probe with
+rect=false/640x640. IR-only selected targets were1/2/2 hits for original/blend/
+moment control, with mean score0.20321/0.30497/0.20379. C-only were7/7/7 and
+mean score0.61029/0.59156/0.60873. Both were8/8/8 and essentially unchanged.
+
+The apparent extra IR-blend hit is also produced by the moment control, while
+C-only localization/score does not improve. V2 therefore does not establish a
+specific benefit from spatial IR retention. The no-full-training stop gate fires.
+
+Remaining category mismatch versus the previous GPU export is expected from
+CPU/GPU convolution/NMS differences near thresholds and from diagnostic greedy
+matching versus the validator's IoU-sorted matching. Single-class multi-label
+NMS is not the main issue. Future CPU probes report within-path continuous score/
+IoU changes, not recovery of GPU-defined categories. Strict category/AP replay
+requires the GPU validator and matched dataloader; it is not warranted by this
+mixed small-sample result.
