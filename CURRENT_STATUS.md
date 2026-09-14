@@ -1,8 +1,8 @@
 # 当前研究状态
 
-> 更新时间：2026-09-14（Asia/Shanghai）  
-> 当前分支：`codex/sacafm-essd`  
-> 长期背景：见 `PROJECT_CONTEXT.md`
+> - 更新时间：2026-09-14（Asia/Shanghai）
+> - 当前分支：`codex/sacafm-essd`
+> - 长期背景：见 `PROJECT_CONTEXT.md`
 
 ## 当前研究阶段
 
