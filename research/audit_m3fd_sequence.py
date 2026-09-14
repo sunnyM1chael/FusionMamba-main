@@ -18,6 +18,9 @@ def parse_args():
     parser.add_argument("--contact-dir", type=Path, required=True)
     parser.add_argument("--top", type=int, default=80)
     parser.add_argument("--rows-per-page", type=int, default=20)
+    parser.add_argument("--overview-step", type=int, default=10)
+    parser.add_argument("--overview-columns", type=int, default=5)
+    parser.add_argument("--overview-rows", type=int, default=6)
     return parser.parse_args()
 
 
@@ -54,6 +57,25 @@ def write_contact_pages(rows, ir, vis, folder, rows_per_page):
         canvas.save(folder / f"boundary_candidates_{page:02d}.jpg", quality=92)
 
 
+def write_overview_pages(stems, ir, vis, folder, step, columns, rows):
+    """Render a coarse whole-dataset overview for complete-sequence review."""
+    selected = stems[::step]
+    per_page = columns * rows
+    cell_width, cell_height = 240, 115
+    for page_start in range(0, len(selected), per_page):
+        page_stems = selected[page_start:page_start + per_page]
+        canvas = Image.new("RGB", (columns * cell_width, rows * cell_height), "white")
+        draw = ImageDraw.Draw(canvas)
+        for index, stem in enumerate(page_stems):
+            row, column = divmod(index, columns)
+            x, y = column * cell_width, row * cell_height
+            canvas.paste(panel(ir[stem], (120, 90)), (x, y + 20))
+            canvas.paste(panel(vis[stem], (120, 90)), (x + 120, y + 20))
+            draw.text((x + 4, y + 3), stem, fill="black")
+        page = page_start // per_page + 1
+        canvas.save(folder / f"sequence_overview_{page:02d}.jpg", quality=90)
+
+
 def index(folder: Path):
     return {path.stem: path for path in folder.glob("*.png")}
 
@@ -83,15 +105,21 @@ def main():
             {"before": before, "after": after, "ir_mae": ir_mae, "vis_mae": vis_mae,
              "score": (ir_mae + vis_mae) / 2.0}
         )
-    transitions.sort(key=lambda row: row["score"], reverse=True)
-    top = transitions[: args.top]
+    chronological_transitions = transitions
+    ranked_transitions = sorted(transitions, key=lambda row: row["score"], reverse=True)
+    top = ranked_transitions[: args.top]
+    scores = np.asarray([row["score"] for row in chronological_transitions])
     duplicates = [group for group in hash_groups.values() if len(group) > 1]
     duplicates.sort(key=lambda group: (-len(group), group[0]))
     result = {
         "root": str(args.root.resolve()),
         "paired_images": len(stems),
         "method": "mean IR/VIS grayscale thumbnail MAE; candidates only, not automatic scene labels",
+        "score_quantiles": {
+            str(q): float(np.quantile(scores, q)) for q in (0.5, 0.75, 0.9, 0.95, 0.98, 0.99)
+        },
         "top_transition_candidates": top,
+        "chronological_transitions": chronological_transitions,
         "equal_combined_dhash_groups": duplicates,
         "equal_combined_dhash_group_count": len(duplicates),
         "limitations": [
@@ -103,6 +131,9 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     write_contact_pages(top, ir, vis, args.contact_dir, args.rows_per_page)
+    write_overview_pages(
+        stems, ir, vis, args.contact_dir, args.overview_step, args.overview_columns, args.overview_rows
+    )
     print(json.dumps({key: result[key] for key in ("paired_images", "equal_combined_dhash_group_count")}, indent=2))
 
 
