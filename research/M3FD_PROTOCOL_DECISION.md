@@ -29,6 +29,13 @@ full-resolution confirmation. The machine-readable screen is
 `research/results/m3fd_sequence_screen_local.json`, with four contact sheets in
 `research/artifacts/m3fd_boundary_contacts` (kept as local review artifacts).
 
+Manual review has started with the 20 highest-scoring transitions. The review
+record is `research/results/m3fd_boundary_review_top20_v1.csv`: 9 are marked
+high-confidence boundaries, 5 are compatible with same-scene motion, and 6
+remain uncertain because a moving-camera sequence can cross tunnels, roads, or
+nearby viewpoints. These labels are triage evidence only; uncertain transitions
+must not be used to freeze groups without adjacent context.
+
 ## Frozen fallback if original metadata cannot be recovered
 
 Create and explicitly name a **custom scene-disjoint protocol**, never an
